@@ -1,4 +1,5 @@
 pub mod connection;
+pub mod dump;
 pub mod metadata;
 pub mod query;
 pub mod ssh;

@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.3.1] — 2026-10-24
+
+### Added
+- **Run selection** — Ctrl+Enter / F5 / Run / Explain execute only the selected SQL when there is a selection; the Run button reads "▶ Run Selection" meanwhile
+- **AI Explain / Optimize / Fix error** — new ✦ ▾ menu next to the AI button (`AiCommand::Assist`, `AiTask`); Optimize and Fix send the live schema plus index definitions; "Fix error with AI" is enabled after a failed query and also offered in the Messages tab. Suggestions open in a review window (never auto-run) with a warning when they add write operations the original didn't have; "Replace in editor" saves the original to history first
+- **Table structure editor** — Edit Table now supports rename/type change (`USING col::type`)/NOT NULL/DEFAULT/drop/add for columns, index add/drop (constraint-backed indexes via `DROP CONSTRAINT`), and table rename; always-visible highlighted DDL preview with a risky-change list, "Open in Editor", and single-transaction apply
+- **Schema dump** — right-click a schema → dump structure + data or structure only to a `.sql` file, generated from the catalogs (no `pg_dump`); consistent `REPEATABLE READ READ ONLY` snapshot, rows streamed through a cursor, `.partial` file renamed on success. PostgreSQL 12+
+- **Export as INSERT** — toolbar button and "Export Selected as INSERT…"; batched 100 rows per statement; target table from browse mode or a single-table query
+- **Import connections from DBeaver** — auto-detects the DBeaver workspace (Windows/macOS/Linux/Flatpak/Snap), decrypts `credentials-config.json`, imports PostgreSQL connections with passwords, SSH, SSL mode, folders and prod/test color; duplicates detected
+- **Update check** — background GitHub releases check at startup with a banner (release notes / skip this version / dismiss); Settings toggle and "Check for updates now"
+
+### Fixed
+- Ctrl+Enter executed the query twice when the editor was focused (global shortcut + editor handler); Ctrl+Enter / F5 now share one path that also honours safe mode
+- Query tabs shared a single editor state (cursor/selection leaked between tabs) — each tab now has its own
+- Edit Table closed and discarded all edits when the `ALTER` failed — now stays open with the error
+- Stale sidebar column/index details after a structure change — reloaded after the DDL succeeds
+- F5 on a multi-statement script now opens one result tab per statement, like the Run button
+
+### Changed
+- `DbCommand::ExecuteDdl` runs via `batch_execute` (simple-query protocol) so multi-statement DDL is one implicit transaction
+- `ColumnInfo` carries `full_type` (`format_type()`), `IndexInfo` carries the backing `constraint`
+- New direct dependencies `aes` 0.8 / `cbc` 0.1 (already linked via russh)
+
+### Performance
+- Extra working-set trim after the startup update check finishes, so the HTTP/TLS stack it touched doesn't stay resident (idle RAM on par with 0.3.0)
+- Binary size ~9.9 MB → ~10.1 MB (release, LTO)
+
+### Testing
+- 14 new unit tests; 3 new `#[ignore]`-gated integration tests (dump/restore round-trip and structure-editor DDL against a live Postgres, GitHub releases API)
+
+---
+
 ## [0.3.0] — 2026-09-08
 
 ### Added

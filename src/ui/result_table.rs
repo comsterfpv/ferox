@@ -35,6 +35,8 @@ pub struct TableOutput {
     pub bulk_export_csv_requested: bool,
     /// Right-click "Export Selected as JSON" (>1 rows selected)
     pub bulk_export_json_requested: bool,
+    /// Right-click "Export Selected as INSERT" (>1 rows selected)
+    pub bulk_export_insert_requested: bool,
     /// Right-click "Delete Selected Rows" (>1 rows selected)
     pub bulk_delete_requested: bool,
     /// Right-click "Duplicate Row" → actual row index
@@ -167,6 +169,7 @@ impl<'a> ResultTable<'a> {
         let mut bulk_copy_requested = false;
         let mut bulk_export_csv_requested = false;
         let mut bulk_export_json_requested = false;
+        let mut bulk_export_insert_requested = false;
         let mut bulk_delete_requested = false;
         let mut duplicate_row_requested: Option<usize> = None;
 
@@ -301,6 +304,10 @@ impl<'a> ResultTable<'a> {
                                             bulk_export_json_requested = true;
                                             ui.close_menu();
                                         }
+                                        if ui.button(i18n.btn_bulk_export_insert()).clicked() {
+                                            bulk_export_insert_requested = true;
+                                            ui.close_menu();
+                                        }
                                         if ui.button(i18n.btn_bulk_delete()).clicked() {
                                             bulk_delete_requested = true;
                                             ui.close_menu();
@@ -391,6 +398,7 @@ impl<'a> ResultTable<'a> {
             bulk_copy_requested,
             bulk_export_csv_requested,
             bulk_export_json_requested,
+            bulk_export_insert_requested,
             bulk_delete_requested,
             duplicate_row_requested,
         }

@@ -20,11 +20,16 @@ pub enum DbCommand {
     LoadDetails { schema: String, table: String },
     LoadPrimaryKey { schema: String, table: String },
     Execute(String),
-    /// DDL statement (CREATE/ALTER TABLE etc.). Emits DdlDone on success.
+    /// DDL script (CREATE/ALTER TABLE etc., possibly several statements).
+    /// Runs through the simple-query protocol, so a multi-statement script is
+    /// one implicit transaction — all of it applies or none. Emits DdlDone.
     ExecuteDdl(String),
     CancelQuery,
     ExportCsv { sql: String, path: String },
     ExportJson { sql: String, path: String },
+    /// Run `sql` and write the result as `INSERT INTO <table>` statements.
+    /// `table` is used verbatim (already quoted/qualified by the caller).
+    ExportInsert { sql: String, path: String, table: String },
     LoadDashboard,
     LoadErDiagram { schema: String },
     /// Execute DML inside an explicit BEGIN — keeps connection in transaction.
@@ -44,7 +49,9 @@ pub enum DbCommand {
     /// Load (table, column, udt_name) snapshot for schema diff.
     LoadSchemaSnapshot { schema: String, request_id: u64 },
     /// Fetch full schema context for AI (all user schemas, tables, columns).
-    LoadFullSchemaForAi { request_id: u64 },
+    /// `with_indexes` adds every index definition (for Optimize / Fix — costs
+    /// prompt tokens, so plain NL→SQL leaves it off).
+    LoadFullSchemaForAi { request_id: u64, with_indexes: bool },
     /// Load all column names for a schema in one query (for autocomplete preload).
     LoadSchemaColumns { schema: String },
     /// Run SQL, extract first cell as plain text, emit DdlText (used for Show DDL).
@@ -56,11 +63,23 @@ pub enum DbCommand {
     /// Write an already-fetched row subset to disk — used for "export selected rows".
     /// Does NOT touch the DB; only reuses the CSV/JSON writers on the worker thread so
     /// the UI thread never does file I/O (see CLAUDE.md thread-separation rule).
-    ExportRows { columns: Vec<String>, rows: Vec<Vec<crate::db::query::CellValue>>, path: String, json: bool },
+    ExportRows { columns: Vec<String>, rows: Vec<Vec<crate::db::query::CellValue>>, path: String, format: ExportFormat },
     /// Import a local CSV file into a table via `COPY ... FROM STDIN`. `columns`
     /// are the CSV file's own header names (Postgres skips the header line itself
     /// via `HEADER true`) — see CLAUDE.md for why this bypasses `execute_query`.
     ImportCsv { schema: String, table: String, path: String, columns: Vec<String> },
+    /// Write a plain-SQL dump of one schema to `path` (structure, optionally data).
+    /// See `db::dump` — streams rows through a cursor, never holds a table in RAM.
+    DumpSchema { schema: String, path: String, with_data: bool },
+}
+
+/// File format for `DbCommand::ExportRows`.
+#[derive(Debug, Clone)]
+pub enum ExportFormat {
+    Csv,
+    Json,
+    /// INSERT statements into `table` (used verbatim, already quoted).
+    Insert { table: String },
 }
 
 /// Events sent from the DB worker → UI thread.
@@ -119,6 +138,8 @@ pub enum DbEvent {
     ImportDone(u64),
     /// CSV import failed.
     ImportError(String),
+    /// Schema dump finished.
+    DumpDone { path: String, tables: usize, rows: u64 },
 }
 
 /// Handle that owns the DB background thread.
@@ -333,7 +354,7 @@ async fn db_worker(cmd_rx: Receiver<DbCommand>, evt_tx: Sender<DbEvent>) {
             DbCommand::ExecuteDdl(sql) => {
                 if ensure_connected(&mut client, &mut cancel_handle, &last_profile, &evt_tx).await {
                     if let Some(c) = &mut client {
-                        match c.execute(sql.as_str(), &[]).await {
+                        match c.batch_execute(sql.as_str()).await {
                             Ok(_) => {
                                 let _ = evt_tx.send(DbEvent::DdlDone);
                             }
@@ -396,9 +417,33 @@ async fn db_worker(cmd_rx: Receiver<DbCommand>, evt_tx: Sender<DbEvent>) {
                 }
             }
 
-            DbCommand::ExportRows { columns, rows, path, json } => {
+            DbCommand::ExportInsert { sql, path, table } => {
+                if ensure_connected(&mut client, &mut cancel_handle, &last_profile, &evt_tx).await {
+                    if let Some(c) = &mut client {
+                        match execute_query(c, &sql).await {
+                            Ok(result) => match export_insert(&result, &table, &path) {
+                                Ok(_) => {
+                                    let _ = evt_tx.send(DbEvent::ExportDone(path));
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx.send(DbEvent::QueryError(e.to_string()));
+                                }
+                            },
+                            Err(e) => {
+                                let _ = evt_tx.send(DbEvent::QueryError(fmt_pg_error(&e)));
+                            }
+                        }
+                    }
+                }
+            }
+
+            DbCommand::ExportRows { columns, rows, path, format } => {
                 let result = QueryResult { columns, rows, rows_affected: None, elapsed_ms: 0.0 };
-                let write = if json { export_json(&result, &path) } else { export_csv(&result, &path) };
+                let write = match &format {
+                    ExportFormat::Csv => export_csv(&result, &path),
+                    ExportFormat::Json => export_json(&result, &path),
+                    ExportFormat::Insert { table } => export_insert(&result, table, &path),
+                };
                 match write {
                     Ok(_) => { let _ = evt_tx.send(DbEvent::ExportDone(path)); }
                     Err(e) => { let _ = evt_tx.send(DbEvent::QueryError(e.to_string())); }
@@ -415,6 +460,23 @@ async fn db_worker(cmd_rx: Receiver<DbCommand>, evt_tx: Sender<DbEvent>) {
                     }
                 } else {
                     let _ = evt_tx.send(DbEvent::ImportError("Not connected".into()));
+                }
+            }
+
+            DbCommand::DumpSchema { schema, path, with_data } => {
+                if ensure_connected(&mut client, &mut cancel_handle, &last_profile, &evt_tx).await {
+                    if let Some(c) = &mut client {
+                        match super::dump::dump_schema(c, &schema, &path, with_data).await {
+                            Ok(stats) => {
+                                let _ = evt_tx.send(DbEvent::DumpDone { path, tables: stats.tables, rows: stats.rows });
+                            }
+                            Err(e) => {
+                                let _ = evt_tx.send(DbEvent::QueryError(fmt_pg_error(&e)));
+                            }
+                        }
+                    }
+                } else {
+                    let _ = evt_tx.send(DbEvent::QueryError("Not connected".into()));
                 }
             }
 
@@ -555,10 +617,10 @@ async fn db_worker(cmd_rx: Receiver<DbCommand>, evt_tx: Sender<DbEvent>) {
                 }
             }
 
-            DbCommand::LoadFullSchemaForAi { request_id } => {
+            DbCommand::LoadFullSchemaForAi { request_id, with_indexes } => {
                 if ensure_connected(&mut client, &mut cancel_handle, &last_profile, &evt_tx).await {
                     if let Some(c) = &client {
-                        let context = metadata::load_full_schema_for_ai(c).await;
+                        let context = metadata::load_full_schema_for_ai(c, with_indexes).await;
                         let _ = evt_tx.send(DbEvent::AiSchemaReady { request_id, context });
                     }
                 } else {
@@ -849,6 +911,12 @@ pub(crate) fn export_csv(result: &QueryResult, path: &str) -> Result<()> {
             .collect();
         writeln!(f, "{}", cells.join(","))?;
     }
+    Ok(())
+}
+
+pub(crate) fn export_insert(result: &QueryResult, table: &str, path: &str) -> Result<()> {
+    let sql = crate::db::query::insert_statements(table, &result.columns, &result.rows);
+    std::fs::write(path, sql)?;
     Ok(())
 }
 

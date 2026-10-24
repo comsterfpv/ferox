@@ -1,6 +1,6 @@
 [package]
 name = "ferox-pg"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Blazing-fast lightweight PostgreSQL client built in Rust"
 authors = ["frkdrgt"]
@@ -67,6 +67,11 @@ sqlformat = "0.2"
 # passwords & API keys — rides on security-framework (already linked via native-tls)
 # and zbus (already linked via rfd→ashpd on Linux), so marginal cost is low.
 keyring = "4"
+
+# Decrypting DBeaver's credentials-config.json (AES-128-CBC) for connection
+# import — both already linked via russh at these versions, no new binary weight.
+aes = "0.8"
+cbc = "0.1"
 
 [profile.release]
 opt-level = 3

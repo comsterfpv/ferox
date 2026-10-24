@@ -30,6 +30,8 @@ pub struct ConnState {
     pub sidebar: Sidebar,
     pub status: ConnectionStatus,
     pub pending_ddl_schema: Option<String>,
+    /// (schema, table) whose details to reload once the pending DDL succeeds.
+    pub pending_ddl_details: Option<(String, String)>,
     pub pending_edit_table: Option<(String, String)>,
     /// True while a safe-mode BEGIN transaction is open on this connection.
     pub in_transaction: bool,
@@ -58,6 +60,7 @@ pub struct PgClientApp {
     pub table_dialog: TableDialog,
     pub join_builder: JoinBuilder,
     pub import_dialog: crate::ui::import_dialog::ImportCsvDialog,
+    pub dbeaver_dialog: crate::ui::dbeaver_dialog::DbeaverImportDialog,
 
     // App state
     pub config: AppConfig,
@@ -79,12 +82,36 @@ pub struct PgClientApp {
     ai_rx: Receiver<AiEvent>,
     /// Draft copy of AI config edited in Settings dialog before saving.
     ai_draft: AiConfig,
-    /// NL prompt waiting for schema fetch before being sent to AI thread.
-    pending_ai_prompt: Option<String>,
+    /// AI request waiting for the schema fetch before being sent to the AI thread.
+    pending_ai: Option<PendingAi>,
     /// request_id counter for schema fetch round-trips.
     ai_schema_req_id: u64,
     /// Frames remaining before the one-shot post-startup working-set trim.
     ws_trim_countdown: u8,
+
+    // ── Update check ──────────────────────────────────────────────────────────
+    /// In-flight check (startup or Settings → Check now).
+    update_rx: Option<Receiver<crate::update::CheckResult>>,
+    update_state: UpdateState,
+    /// True for a check the user started by hand — then "up to date" and errors
+    /// are reported too; a silent startup check only ever announces a release.
+    update_manual: bool,
+}
+
+#[derive(Debug, Default)]
+enum UpdateState {
+    #[default]
+    Idle,
+    Checking,
+    UpToDate,
+    Available(crate::update::ReleaseInfo),
+    Failed(String),
+}
+
+/// AI request parked until `DbEvent::AiSchemaReady` delivers the schema context.
+enum PendingAi {
+    NlToSql(String),
+    Assist { task: crate::ai::AiTask, sql: String, error: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,6 +165,12 @@ impl PgClientApp {
         AiHandle::spawn(config.ai.clone(), ai_cmd_rx, ai_evt_tx);
         let ai_draft = config.ai.clone();
 
+        let (update_rx, update_state) = if config.check_updates {
+            (Some(crate::update::spawn_check(cc.egui_ctx.clone())), UpdateState::Checking)
+        } else {
+            (None, UpdateState::Idle)
+        };
+
         Self {
             connections: Vec::new(),
             active_conn: 0,
@@ -146,6 +179,7 @@ impl PgClientApp {
             connection_dialog: ConnectionDialog::default(),
             table_dialog: TableDialog::default(),
             import_dialog: crate::ui::import_dialog::ImportCsvDialog::default(),
+            dbeaver_dialog: crate::ui::dbeaver_dialog::DbeaverImportDialog::default(),
             join_builder: JoinBuilder::default(),
             config,
             history,
@@ -159,9 +193,12 @@ impl PgClientApp {
             ai_tx: ai_cmd_tx,
             ai_rx: ai_evt_rx,
             ai_draft,
-            pending_ai_prompt: None,
+            pending_ai: None,
             ai_schema_req_id: 0,
             ws_trim_countdown: 5,
+            update_rx,
+            update_state,
+            update_manual: false,
         }
     }
 
@@ -190,6 +227,7 @@ impl PgClientApp {
                 sidebar: Sidebar::default(),
                 status: ConnectionStatus::Connecting,
                 pending_ddl_schema: None,
+                pending_ddl_details: None,
                 pending_edit_table: None,
                 in_transaction: false,
                 pending_script: None,
@@ -229,6 +267,7 @@ impl PgClientApp {
             sidebar: Sidebar::default(),
             status: ConnectionStatus::Connecting,
             pending_ddl_schema: None,
+            pending_ddl_details: None,
             pending_edit_table: None,
             in_transaction: false,
             pending_script: None,
@@ -325,7 +364,7 @@ impl PgClientApp {
                         {
                             self.connections[i].pending_edit_table = None;
                             let schemas = self.connections[i].sidebar.schema_names();
-                            self.table_dialog.open_edit(schema, table, columns, schemas);
+                            self.table_dialog.open_edit(schema, table, columns, indexes.clone(), schemas);
                         }
                     }
                     DbEvent::PrimaryKey { schema, table, columns } => {
@@ -351,12 +390,25 @@ impl PgClientApp {
                     }
                     DbEvent::AiSchemaReady { request_id, context } => {
                         if request_id == self.ai_schema_req_id {
-                            if let Some(prompt) = self.pending_ai_prompt.take() {
-                                let _ = self.ai_tx.send(AiCommand::NlToSql { prompt, schema_context: context });
+                            let cmd = match self.pending_ai.take() {
+                                Some(PendingAi::NlToSql(prompt)) => {
+                                    Some(AiCommand::NlToSql { prompt, schema_context: context })
+                                }
+                                Some(PendingAi::Assist { task, sql, error }) => {
+                                    Some(AiCommand::Assist { task, sql, error, schema_context: context })
+                                }
+                                None => None,
+                            };
+                            if let Some(cmd) = cmd {
+                                let _ = self.ai_tx.send(cmd);
                             }
                         }
                     }
                     DbEvent::QueryError(msg) => {
+                        if self.connections[i].pending_ddl_schema.take().is_some() {
+                            self.connections[i].pending_ddl_details = None;
+                            self.table_dialog.ddl_failed(&msg);
+                        }
                         self.tab_manager.set_error_for(conn_id, msg);
                     }
                     DbEvent::ExportDone(path) => {
@@ -371,6 +423,9 @@ impl PgClientApp {
                         self.import_dialog.running = false;
                         self.tab_manager.set_error_for(conn_id, msg);
                     }
+                    DbEvent::DumpDone { path, tables, rows } => {
+                        self.tab_manager.log_info(self.i18n.log_dump_done(&path, tables, rows));
+                    }
                     DbEvent::KillDone(_pid) => {
                         // Auto-reload dashboard after kill
                         self.tab_manager.set_dashboard_loading();
@@ -383,10 +438,15 @@ impl PgClientApp {
                         self.tab_manager.set_sql(text);
                     }
                     DbEvent::DdlDone => {
+                        self.table_dialog.finish_ddl();
                         if let Some(schema) = self.connections[i].pending_ddl_schema.take() {
                             let _ = self.connections[i]
                                 .db_tx
                                 .send(DbCommand::LoadTables { schema });
+                        }
+                        if let Some((schema, table)) = self.connections[i].pending_ddl_details.take() {
+                            self.connections[i].sidebar.invalidate_table_details(&schema, &table);
+                            let _ = self.connections[i].db_tx.send(DbCommand::LoadDetails { schema, table });
                         }
                     }
                     DbEvent::DashboardData { table_stats, connections, index_stats } => {
@@ -443,6 +503,9 @@ impl PgClientApp {
                 AiEvent::SqlGenerated(sql) => {
                     self.tab_manager.set_active_ai_result(sql);
                 }
+                AiEvent::AssistDone(result) => {
+                    self.tab_manager.set_active_ai_assist_result(result);
+                }
                 AiEvent::Error(msg) => {
                     self.tab_manager.set_active_ai_error(msg);
                 }
@@ -457,6 +520,10 @@ impl PgClientApp {
                 if ui.button(i18n.menu_new_connection()).clicked() {
                     self.show_connection_dialog = true;
                     self.connection_dialog.reset();
+                    ui.close_menu();
+                }
+                if ui.button(i18n.menu_import_dbeaver()).clicked() {
+                    self.dbeaver_dialog.open_auto(&self.config.connections);
                     ui.close_menu();
                 }
                 if !self.config.connections.is_empty() {
@@ -558,7 +625,7 @@ impl PgClientApp {
                 }
                 ui.separator();
                 if ui.button(i18n.menu_execute()).clicked() {
-                    self.execute_query();
+                    self.execute_query(&ui.ctx().clone());
                     ui.close_menu();
                 }
                 if ui.button(i18n.menu_cancel()).clicked() {
@@ -708,12 +775,104 @@ impl PgClientApp {
                     }
                 });
                 ui.separator();
+                if ui
+                    .checkbox(&mut self.config.check_updates, i18n.menu_check_updates_startup())
+                    .changed()
+                {
+                    let _ = self.config.save();
+                }
+                if ui
+                    .add_enabled(self.update_rx.is_none(), egui::Button::new(i18n.menu_check_updates_now()))
+                    .clicked()
+                {
+                    self.update_rx = Some(crate::update::spawn_check(ui.ctx().clone()));
+                    self.update_state = UpdateState::Checking;
+                    self.update_manual = true;
+                    ui.close_menu();
+                }
+                ui.separator();
                 if ui.button(i18n.menu_about()).clicked() {
                     self.show_about = true;
                     ui.close_menu();
                 }
             });
         });
+    }
+
+    fn poll_update_check(&mut self) {
+        let Some(rx) = &self.update_rx else { return };
+        let Ok(result) = rx.try_recv() else { return };
+        self.update_rx = None;
+        // The check's HTTP/TLS stack (reqwest, schannel/OpenSSL, a tokio
+        // runtime) is touched once and then idle — the startup trim above ran
+        // before it finished, so trim again or those pages stay resident (~5 MB).
+        trim_working_set();
+        self.update_state = match result {
+            Ok(Some(release)) => UpdateState::Available(release),
+            Ok(None) => UpdateState::UpToDate,
+            Err(e) => UpdateState::Failed(e),
+        };
+    }
+
+    /// Top banner for update-check results. A startup check only surfaces a new
+    /// release (unless the user skipped that version); a manual check also
+    /// reports "checking…", "up to date" and failures.
+    fn render_update_banner(&mut self, ctx: &egui::Context) {
+        let i18n = self.i18n;
+        let visible = match &self.update_state {
+            UpdateState::Idle => false,
+            UpdateState::Available(r) => {
+                self.update_manual || self.config.skipped_version.as_deref() != Some(r.version.as_str())
+            }
+            UpdateState::Checking | UpdateState::UpToDate | UpdateState::Failed(_) => self.update_manual,
+        };
+        if !visible {
+            return;
+        }
+        let mut dismiss = false;
+        egui::TopBottomPanel::top("update_banner").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                match &self.update_state {
+                    UpdateState::Checking => {
+                        ui.spinner();
+                        ui.label(i18n.update_checking());
+                    }
+                    UpdateState::UpToDate => {
+                        ui.colored_label(
+                            Color32::from_rgb(80, 200, 120),
+                            i18n.update_up_to_date(env!("CARGO_PKG_VERSION")),
+                        );
+                    }
+                    UpdateState::Failed(e) => {
+                        ui.colored_label(Color32::from_rgb(220, 80, 80), i18n.update_failed(e));
+                    }
+                    UpdateState::Available(r) => {
+                        ui.colored_label(
+                            Color32::from_rgb(78, 159, 222),
+                            i18n.update_available(&r.version, env!("CARGO_PKG_VERSION")),
+                        );
+                        if ui.button(i18n.update_btn_release_notes()).clicked() {
+                            ctx.open_url(egui::OpenUrl::new_tab(&r.url));
+                        }
+                        if ui.button(i18n.update_btn_skip()).clicked() {
+                            self.config.skipped_version = Some(r.version.clone());
+                            let _ = self.config.save();
+                            dismiss = true;
+                        }
+                    }
+                    UpdateState::Idle => {}
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✕").clicked() {
+                        dismiss = true;
+                    }
+                });
+            });
+        });
+        if dismiss {
+            self.update_state = UpdateState::Idle;
+            self.update_manual = false;
+        }
     }
 
     fn render_status_bar(&self, ctx: &egui::Context) {
@@ -756,8 +915,16 @@ impl PgClientApp {
         });
     }
 
-    fn execute_query(&mut self) {
-        let sql = self.tab_manager.current_sql().to_owned();
+    /// Ctrl+Enter / F5 / Query→Execute: runs the active tab's selection (or the
+    /// whole editor). The single entry point for these, so safe mode always applies.
+    fn execute_query(&mut self, ctx: &egui::Context) {
+        if let Some(sql) = self.tab_manager.take_run_sql(ctx) {
+            self.execute_sql(sql);
+        }
+    }
+
+    /// Run exactly `sql` on the active tab's connection (safe mode applies).
+    fn execute_sql(&mut self, sql: String) {
         if sql.trim().is_empty() {
             return;
         }
@@ -772,7 +939,7 @@ impl PgClientApp {
             let cmd = if self.safe_mode && !in_tx && is_dml(&sql) {
                 DbCommand::ExecuteSafe(sql)
             } else {
-                DbCommand::Execute(sql)
+                crate::ui::query_panel::execute_command(sql)
             };
             let _ = self.connections[idx].db_tx.send(cmd);
         } else {
@@ -1018,7 +1185,7 @@ impl eframe::App for PgClientApp {
                 || (i.modifiers.ctrl && i.key_pressed(egui::Key::Enter))
         });
         if should_execute {
-            self.execute_query();
+            self.execute_query(ctx);
         }
 
         let should_cancel = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C));
@@ -1032,6 +1199,9 @@ impl eframe::App for PgClientApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             self.render_menu(ui);
         });
+
+        self.poll_update_check();
+        self.render_update_banner(ctx);
 
         // Safe mode transaction banner (shown when a BEGIN is open)
         let active_in_tx = self.connections.get(self.active_conn)
@@ -1154,8 +1324,8 @@ impl eframe::App for PgClientApp {
                             }
                         }
                         SidebarAction::RunSql(sql) => {
-                            self.tab_manager.set_sql(sql);
-                            self.execute_query();
+                            self.tab_manager.set_sql(sql.clone());
+                            self.execute_sql(sql);
                         }
                         SidebarAction::NewTable { schema } => {
                             if let Some(conn) = self.connections.get(self.active_conn) {
@@ -1216,6 +1386,31 @@ impl eframe::App for PgClientApp {
                                 self.import_dialog.open_for(schema, table, path);
                             }
                         }
+                        SidebarAction::DumpSchema { schema, with_data } => {
+                            let in_tx = self
+                                .connections
+                                .get(self.active_conn)
+                                .is_some_and(|c| c.in_transaction);
+                            if in_tx {
+                                // The dump runs in its own BEGIN … ROLLBACK on the
+                                // same session, which would discard the open work.
+                                self.tab_manager
+                                    .set_error_for(conn_id, self.i18n.err_dump_in_transaction().to_owned());
+                            } else if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("SQL files", &["sql"])
+                                .set_file_name(format!(
+                                    "{schema}_{}.sql",
+                                    chrono::Local::now().format("%Y%m%d_%H%M%S")
+                                ))
+                                .save_file()
+                                .map(|p| p.to_string_lossy().into_owned())
+                            {
+                                if let Some(conn) = self.connections.get(self.active_conn) {
+                                    self.tab_manager.log_info(self.i18n.log_dump_started(&schema));
+                                    let _ = conn.db_tx.send(DbCommand::DumpSchema { schema, path, with_data });
+                                }
+                            }
+                        }
                         SidebarAction::EditTable { schema, table } => {
                             let cached = self
                                 .connections
@@ -1224,12 +1419,12 @@ impl eframe::App for PgClientApp {
                                     conn.sidebar
                                         .get_table_details(&schema, &table)
                                         .filter(|d| d.loaded)
-                                        .map(|d| d.columns.clone())
+                                        .map(|d| (d.columns.clone(), d.indexes.clone()))
                                 });
-                            if let Some(columns) = cached {
+                            if let Some((columns, indexes)) = cached {
                                 if let Some(conn) = self.connections.get(self.active_conn) {
                                     let schemas = conn.sidebar.schema_names();
-                                    self.table_dialog.open_edit(schema, table, columns, schemas);
+                                    self.table_dialog.open_edit(schema, table, columns, indexes, schemas);
                                 }
                             } else {
                                 if let Some(conn) = self.connections.get_mut(self.active_conn) {
@@ -1268,14 +1463,29 @@ impl eframe::App for PgClientApp {
         });
 
         // ── Handle pending NL→SQL requests from the active panel ─────────────
-        if let Some(prompt) = self.tab_manager.take_active_nl_submit() {
-            // Two-step: fetch full live schema from DB, then fire AI.
+        // Two-step for every AI request: fetch the live schema from the DB, then
+        // fire the AI call with it (AiSchemaReady above).
+        let ai_request = self
+            .tab_manager
+            .take_active_nl_submit()
+            .map(PendingAi::NlToSql)
+            .or_else(|| {
+                self.tab_manager
+                    .take_active_ai_assist()
+                    .map(|(task, sql, error)| PendingAi::Assist { task, sql, error })
+            });
+        if let Some(req) = ai_request {
             if let Some(conn) = self.connections.get(self.active_conn) {
+                // Rewrites need the indexes to reason about performance and names.
+                let with_indexes = matches!(req, PendingAi::Assist { .. });
                 self.ai_schema_req_id += 1;
-                self.pending_ai_prompt = Some(prompt);
+                self.pending_ai = Some(req);
                 let _ = conn.db_tx.send(DbCommand::LoadFullSchemaForAi {
                     request_id: self.ai_schema_req_id,
+                    with_indexes,
                 });
+            } else {
+                self.tab_manager.set_active_ai_error(self.i18n.err_not_connected().to_owned());
             }
         }
 
@@ -1301,8 +1511,8 @@ impl eframe::App for PgClientApp {
         for action in self.join_builder.show(ctx, &i18n) {
             match action {
                 JoinAction::Run(sql) => {
-                    self.tab_manager.set_sql(sql);
-                    self.execute_query();
+                    self.tab_manager.set_sql(sql.clone());
+                    self.execute_sql(sql);
                 }
                 JoinAction::SendToEditor(sql) => {
                     self.tab_manager.set_sql(sql);
@@ -1318,13 +1528,27 @@ impl eframe::App for PgClientApp {
         // Table dialog (New / Edit)
         if let Some(action) = self.table_dialog.show(ctx, &i18n) {
             match action {
-                TableDialogAction::ExecuteDdl { sql, refresh_schema } => {
+                TableDialogAction::ExecuteDdl { sql, refresh_schema, edited } => {
                     if let Some(conn) = self.connections.get_mut(self.active_conn) {
                         conn.pending_ddl_schema = Some(refresh_schema);
+                        conn.pending_ddl_details = edited;
                         let _ = conn.db_tx.send(DbCommand::ExecuteDdl(sql));
+                    } else {
+                        self.table_dialog.ddl_failed(i18n.err_not_connected());
                     }
                 }
+                TableDialogAction::OpenInEditor(sql) => {
+                    let conn_id = self.connections.get(self.active_conn).map(|c| c.id).unwrap_or(0);
+                    self.tab_manager.new_tab(conn_id);
+                    self.tab_manager.set_sql(sql);
+                }
             }
+        }
+
+        // DBeaver connection import
+        if let Some(profiles) = self.dbeaver_dialog.show(ctx, &i18n, &self.config.connections) {
+            self.config.connections.extend(profiles);
+            let _ = self.config.save();
         }
 
         // CSV import confirmation dialog

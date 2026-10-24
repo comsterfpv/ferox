@@ -51,6 +51,11 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub is_nullable: bool,
     pub column_default: Option<String>,
+    /// Exact type as `format_type()` renders it (`character varying(255)`,
+    /// `text[]`, `public.mood`) — `data_type` is the coarser information_schema
+    /// name (`character varying`, `ARRAY`, `USER-DEFINED`). Used by the table
+    /// structure editor so an untouched column never looks like a type change.
+    pub full_type: String,
 }
 
 pub async fn load_schemas(client: &Client) -> Result<Vec<SchemaInfo>> {
@@ -133,6 +138,9 @@ pub struct IndexInfo {
     pub name: String,
     pub is_unique: bool,
     pub definition: String,
+    /// Constraint backed by this index (PK / UNIQUE / EXCLUDE) — such an index
+    /// is dropped via `ALTER TABLE … DROP CONSTRAINT`, not `DROP INDEX`.
+    pub constraint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,7 +178,10 @@ pub async fn load_indexes(
 ) -> Result<Vec<IndexInfo>> {
     let rows = client
         .query(
-            "SELECT i.relname, ix.indisunique, pg_get_indexdef(ix.indexrelid)
+            "SELECT i.relname, ix.indisunique, pg_get_indexdef(ix.indexrelid),
+                    (SELECT c.conname FROM pg_constraint c
+                     WHERE c.conindid = ix.indexrelid AND c.conrelid = t.oid
+                       AND c.contype IN ('p', 'u', 'x') LIMIT 1)::text
              FROM pg_class t
              JOIN pg_index ix ON t.oid = ix.indrelid
              JOIN pg_class i ON i.oid = ix.indexrelid
@@ -187,6 +198,7 @@ pub async fn load_indexes(
             name: r.get(0),
             is_unique: r.get(1),
             definition: r.get(2),
+            constraint: r.get::<_, Option<String>>(3),
         })
         .collect())
 }
@@ -334,7 +346,7 @@ pub async fn load_schema_snapshot(
 /// Returns a compact multi-line string:
 /// `- schema.table (col1 type1, col2 type2, ...)`
 /// Excludes system schemas (pg_catalog, information_schema, pg_toast*).
-pub async fn load_full_schema_for_ai(client: &Client) -> String {
+pub async fn load_full_schema_for_ai(client: &Client, with_indexes: bool) -> String {
     let sql = "SELECT table_schema, table_name, column_name, udt_name \
                FROM information_schema.columns \
                WHERE table_schema NOT IN ('pg_catalog','information_schema','pg_toast') \
@@ -362,6 +374,27 @@ pub async fn load_full_schema_for_ai(client: &Client) -> String {
     let mut out = String::new();
     for ((schema, table), cols) in &map {
         out.push_str(&format!("- {schema}.{table} ({})\n", cols.join(", ")));
+    }
+
+    if with_indexes {
+        let idx_sql = "SELECT indexdef FROM pg_indexes \
+                       WHERE schemaname NOT IN ('pg_catalog','information_schema','pg_toast') \
+                       ORDER BY schemaname, tablename, indexname";
+        if let Ok(msgs) = client.simple_query(idx_sql).await {
+            let defs: Vec<String> = msgs
+                .into_iter()
+                .filter_map(|m| match m {
+                    tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_owned),
+                    _ => None,
+                })
+                .collect();
+            if !defs.is_empty() {
+                out.push_str("\nIndexes:\n");
+                for d in defs {
+                    out.push_str(&format!("- {d}\n"));
+                }
+            }
+        }
     }
     out
 }
@@ -597,10 +630,14 @@ pub async fn load_columns(
 ) -> Result<Vec<ColumnInfo>> {
     let rows = client
         .query(
-            "SELECT column_name, data_type, is_nullable, column_default
-             FROM information_schema.columns
-             WHERE table_schema = $1 AND table_name = $2
-             ORDER BY ordinal_position",
+            "SELECT c.column_name::text, c.data_type::text, c.is_nullable::text, c.column_default::text,
+                    format_type(a.atttypid, a.atttypmod)
+             FROM information_schema.columns c
+             JOIN pg_namespace n ON n.nspname = c.table_schema
+             JOIN pg_class t ON t.relnamespace = n.oid AND t.relname = c.table_name
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attname = c.column_name
+             WHERE c.table_schema = $1 AND c.table_name = $2
+             ORDER BY c.ordinal_position",
             &[&schema, &table],
         )
         .await?;
@@ -612,6 +649,7 @@ pub async fn load_columns(
             data_type: r.get::<_, String>(1),
             is_nullable: r.get::<_, String>(2) == "YES",
             column_default: r.get::<_, Option<String>>(3),
+            full_type: r.get::<_, String>(4),
         })
         .collect())
 }

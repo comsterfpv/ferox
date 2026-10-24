@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 
+use crate::ai::{AiAssistResult, AiTask};
+use crate::db::connection::ExportFormat;
+use crate::db::query::{guess_single_table, quote_ident};
 use crate::db::{query::CellValue, DbCommand, QueryResult};
 use crate::history::QueryHistory;
 use crate::i18n::{I18n, Lang};
@@ -40,6 +43,17 @@ fn compute_col_widths(result: &QueryResult) -> Vec<f32> {
 }
 
 // ── SQL statement splitter ────────────────────────────────────────────────────
+
+/// Command for running `sql` from the editor: several statements → ExecuteMulti
+/// (one result tab each), a single one → Execute.
+pub fn execute_command(sql: String) -> DbCommand {
+    let stmts = split_sql_statements(&sql);
+    if stmts.len() > 1 {
+        DbCommand::ExecuteMulti(stmts)
+    } else {
+        DbCommand::Execute(sql)
+    }
+}
 
 /// Split SQL at `;` boundaries, correctly skipping `;` inside single-quoted
 /// strings and `--` line comments. Returns non-empty, trimmed statements.
@@ -431,6 +445,14 @@ pub struct QueryPanel {
     pub nl_submit: Option<String>,
     /// True while an AI request is in flight — spinner shown, input disabled.
     pub ai_pending: bool,
+    /// Pending Explain / Optimize / Fix request (task, sql, error), taken by the app.
+    pub ai_assist_submit: Option<(AiTask, String, Option<String>)>,
+    /// Last query error — enables "Fix error with AI". Cleared on the next run.
+    last_error: Option<String>,
+    /// AI answer being shown in the suggestion window, plus the SQL it was asked about.
+    ai_suggestion: Option<(AiAssistResult, String)>,
+    /// SQL of the in-flight assist request (paired with the answer when it arrives).
+    ai_assist_asked: Option<String>,
     // ── Ctrl+F in-table search (highlights cells, does not filter rows) ───────
     /// Current search term (separate from row-level result_filter).
     search_text: String,
@@ -453,7 +475,14 @@ pub struct QueryPanel {
     snippet_name_input: String,
     /// Auto-focus the name TextEdit on the next frame.
     snippet_name_focus: bool,
+    /// Per-panel id of the SQL TextEdit. A shared id made every tab share one
+    /// cursor/selection state, so a selection made in one tab leaked into the
+    /// next — fatal once "run selection" executes exactly that range.
+    editor_id: egui::Id,
 }
+
+/// Source of unique `QueryPanel::editor_id`s.
+static NEXT_EDITOR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Default for QueryPanel {
     fn default() -> Self {
@@ -496,6 +525,10 @@ impl Default for QueryPanel {
             nl_input: String::new(),
             nl_submit: None,
             ai_pending: false,
+            ai_assist_submit: None,
+            last_error: None,
+            ai_suggestion: None,
+            ai_assist_asked: None,
             search_text: String::new(),
             search_visible: false,
             search_needs_focus: false,
@@ -506,6 +539,10 @@ impl Default for QueryPanel {
             snippet_save_open: false,
             snippet_name_input: String::new(),
             snippet_name_focus: false,
+            editor_id: egui::Id::new((
+                "ferox_sql_editor",
+                NEXT_EDITOR_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            )),
         }
     }
 }
@@ -520,8 +557,33 @@ impl QueryPanel {
         !self.completion_tables.is_empty() || !self.completion_columns.is_empty()
     }
 
-    pub fn current_sql(&self) -> &str {
-        &self.sql
+    /// The editor's selected text, if the selection is non-blank.
+    fn selected_sql(&self, ctx: &egui::Context) -> Option<&str> {
+        let range = egui::TextEdit::load_state(ctx, self.editor_id)?.cursor.char_range()?;
+        let (a, b) = (
+            range.primary.index.min(range.secondary.index),
+            range.primary.index.max(range.secondary.index),
+        );
+        let sel = &self.sql[char_idx_to_byte(&self.sql, a)..char_idx_to_byte(&self.sql, b)];
+        (!sel.trim().is_empty()).then_some(sel)
+    }
+
+    /// SQL the run actions (Run / Ctrl+Enter / F5 / Explain) execute: the
+    /// selection if there is one, otherwise the whole editor.
+    fn sql_to_run(&self, ctx: &egui::Context) -> String {
+        self.selected_sql(ctx).unwrap_or(&self.sql).to_owned()
+    }
+
+    /// Leave browse mode and return the SQL to execute for a Ctrl+Enter / F5 run
+    /// (app.rs owns that path so safe mode applies). `None` if there is nothing to run.
+    pub fn take_run_sql(&mut self, ctx: &egui::Context) -> Option<String> {
+        let sql = self.sql_to_run(ctx);
+        if sql.trim().is_empty() {
+            return None;
+        }
+        self.browse = None;
+        self.browse_result = false;
+        Some(sql)
     }
 
     /// True if this panel has no SQL, no result, and is not browsing a table.
@@ -543,6 +605,7 @@ impl QueryPanel {
 
     pub fn set_running(&mut self) {
         self.running = true;
+        self.last_error = None;
     }
 
     fn push_log(&mut self, entry: LogEntry) {
@@ -622,6 +685,128 @@ impl QueryPanel {
         self.nl_bar_visible = false;
     }
 
+    /// Called by the app when an Explain / Optimize / Fix answer arrives.
+    pub fn set_ai_assist_result(&mut self, result: AiAssistResult) {
+        self.ai_pending = false;
+        let asked = self.ai_assist_asked.take().unwrap_or_default();
+        self.ai_suggestion = Some((result, asked));
+    }
+
+    /// Queue an Explain / Optimize / Fix request for the app to send.
+    fn request_ai_assist(&mut self, task: AiTask, ctx: &egui::Context) {
+        let sql = self.sql_to_run(ctx);
+        if sql.trim().is_empty() || self.ai_pending {
+            return;
+        }
+        let error = if task == AiTask::FixError { self.last_error.clone() } else { None };
+        self.ai_assist_asked = Some(sql.clone());
+        self.ai_assist_submit = Some((task, sql, error));
+        self.ai_pending = true;
+    }
+
+    /// Floating window with the AI's explanation / rewritten SQL.
+    fn show_ai_suggestion(&mut self, ctx: &egui::Context, history: &mut QueryHistory, i18n: &I18n) {
+        let Some((result, asked)) = &self.ai_suggestion else { return };
+        let title = match result.task {
+            AiTask::Explain => i18n.ai_title_explain(),
+            AiTask::Optimize => i18n.ai_title_optimize(),
+            AiTask::FixError => i18n.ai_title_fix(),
+        };
+        let new_writes = result
+            .sql
+            .as_deref()
+            .map(|s| crate::ai::new_write_operations(asked, s))
+            .unwrap_or_default();
+        let mut open = true;
+        let mut replace_with: Option<String> = None;
+        let mut close = false;
+        egui::Window::new(title)
+            .id(egui::Id::new("ai_suggestion").with(self.editor_id))
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_source("ai_notes_scroll")
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        if result.notes.is_empty() {
+                            ui.label(egui::RichText::new("—").color(egui::Color32::GRAY));
+                        } else {
+                            ui.label(&result.notes);
+                        }
+                    });
+                match &result.sql {
+                    Some(sql) => {
+                        ui.separator();
+                        if !new_writes.is_empty() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(230, 80, 80),
+                                egui::RichText::new(i18n.ai_warn_new_writes(&new_writes.join(", "))).strong(),
+                            );
+                        }
+                        let mut shown = sql.clone();
+                        let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
+                            let job = highlight_sql(ui, text, wrap_width);
+                            ui.fonts(|f| f.layout_job(job))
+                        };
+                        egui::ScrollArea::vertical()
+                            .id_source("ai_sql_scroll")
+                            .max_height(240.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut shown)
+                                        .desired_width(f32::INFINITY)
+                                        .interactive(false)
+                                        .layouter(&mut layouter),
+                                );
+                            });
+                        ui.horizontal(|ui| {
+                            if ui.button(i18n.ai_btn_replace()).clicked() {
+                                replace_with = Some(sql.clone());
+                            }
+                            if ui.button(i18n.ai_btn_copy_sql()).clicked() {
+                                ui.ctx().copy_text(sql.clone());
+                            }
+                            if ui.button(i18n.btn_close()).clicked() {
+                                close = true;
+                            }
+                        });
+                    }
+                    None => {
+                        if result.task != AiTask::Explain {
+                            ui.label(
+                                egui::RichText::new(i18n.ai_no_change())
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button(i18n.ai_btn_copy_text()).clicked() {
+                                ui.ctx().copy_text(result.notes.clone());
+                            }
+                            if ui.button(i18n.btn_close()).clicked() {
+                                close = true;
+                            }
+                        });
+                    }
+                }
+            });
+        if let Some(sql) = replace_with {
+            // Keep the original recoverable through history (↑) before replacing.
+            if !self.sql.trim().is_empty() {
+                history.push(self.sql.clone());
+                let _ = history.save();
+            }
+            self.sql = sql;
+            close = true;
+        }
+        if !open || close {
+            self.ai_suggestion = None;
+        }
+    }
+
     /// Called by the app when the AI call fails.
     pub fn set_ai_error(&mut self, msg: String) {
         self.ai_pending = false;
@@ -630,6 +815,7 @@ impl QueryPanel {
     }
 
     pub fn set_error(&mut self, msg: String) {
+        self.last_error = Some(msg.clone());
         self.push_log(LogEntry::error(msg));
         self.running = false;
         self.active_tab = PanelTab::Messages;
@@ -638,6 +824,11 @@ impl QueryPanel {
     pub fn set_export_done(&mut self, path: String) {
         let i18n = I18n::new(self.lang);
         self.push_log(LogEntry::info(i18n.log_exported(&path)));
+    }
+
+    pub fn log_info(&mut self, msg: String) {
+        self.push_log(LogEntry::info(msg));
+        self.active_tab = PanelTab::Messages;
     }
 
     pub fn set_import_done(&mut self, rows: u64) {
@@ -686,14 +877,9 @@ impl QueryPanel {
         }
     }
 
-    /// Send current SQL: multiple statements → ExecuteMulti, single → Execute.
-    fn send_execute(&self, db_tx: &Sender<DbCommand>) {
-        let stmts = split_sql_statements(&self.sql);
-        if stmts.len() > 1 {
-            let _ = db_tx.send(DbCommand::ExecuteMulti(stmts));
-        } else {
-            let _ = db_tx.send(DbCommand::Execute(self.sql.clone()));
-        }
+    /// Send `sql`: multiple statements → ExecuteMulti, single → Execute.
+    fn send_execute(sql: String, db_tx: &Sender<DbCommand>) {
+        let _ = db_tx.send(execute_command(sql));
     }
 
 
@@ -709,6 +895,23 @@ impl QueryPanel {
         if let Some(path) = pick_save_path("json") {
             let _ = db_tx.send(DbCommand::ExportJson { sql, path });
         }
+    }
+
+    pub fn trigger_export_insert(&mut self, db_tx: &Sender<DbCommand>) {
+        let sql = self.export_sql();
+        let table = self.export_table_name();
+        if let Some(path) = pick_save_path("sql") {
+            let _ = db_tx.send(DbCommand::ExportInsert { sql, path, table });
+        }
+    }
+
+    /// Target table for INSERT export: the browsed table, else the single table
+    /// the query reads from, else a placeholder for the user to fill in.
+    fn export_table_name(&self) -> String {
+        if let Some(state) = &self.browse {
+            return format!("{}.{}", quote_ident(&state.schema), quote_ident(&state.table));
+        }
+        guess_single_table(&self.sql).unwrap_or_else(|| "table_name".to_owned())
     }
 
     /// Open a SQL file via native dialog and execute it directly (no editor load).
@@ -758,6 +961,8 @@ impl QueryPanel {
         ai_enabled: bool,
         null_color: egui::Color32,
     ) {
+        self.show_ai_suggestion(ui.ctx(), history, i18n);
+
         // Auto-refresh after a DML (UPDATE/INSERT/DELETE) in browse mode.
         if self.pending_refresh {
             self.pending_refresh = false;
@@ -791,19 +996,27 @@ impl QueryPanel {
                     let col_dim   = egui::Color32::from_rgb(76, 80, 82);    // #4c5052
 
                     // ── Group 1: Execute ──────────────────────────────────────
-                    let run_label = if self.running { i18n.btn_running() } else { i18n.btn_run() };
+                    let has_selection = self.selected_sql(ui.ctx()).is_some();
+                    let run_label = if self.running {
+                        i18n.btn_running()
+                    } else if has_selection {
+                        i18n.btn_run_selection()
+                    } else {
+                        i18n.btn_run()
+                    };
                     let run_fill  = if self.running { col_dim } else { col_green };
                     if ui
                         .add_enabled(!self.running, egui::Button::new(run_label).fill(run_fill))
                         .clicked()
                         && !self.sql.trim().is_empty()
                     {
+                        let sql = self.sql_to_run(ui.ctx());
                         self.browse = None;
                         self.browse_result = false;
-                        history.push(self.sql.clone());
+                        history.push(sql.clone());
                         let _ = history.save();
                         self.set_running();
-                        self.send_execute(db_tx);
+                        Self::send_execute(sql, db_tx);
                     }
 
                     let cancel_fill = if self.running { col_red } else { col_dim };
@@ -822,13 +1035,13 @@ impl QueryPanel {
                         .on_hover_text(i18n.hover_explain())
                         .clicked()
                     {
+                        let sql = self.sql_to_run(ui.ctx());
                         self.browse = None;
                         self.explain_mode = true;
                         let explain_sql = format!(
-                            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)\n{}",
-                            self.sql
+                            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)\n{sql}"
                         );
-                        history.push(self.sql.clone());
+                        history.push(sql);
                         let _ = history.save();
                         self.set_running();
                         let _ = db_tx.send(DbCommand::Execute(explain_sql));
@@ -896,6 +1109,9 @@ impl QueryPanel {
                     if ui.button("JSON").on_hover_text(i18n.hover_export_json()).clicked() {
                         self.trigger_export_json(db_tx);
                     }
+                    if ui.button("INSERT").on_hover_text(i18n.hover_export_insert()).clicked() {
+                        self.trigger_export_insert(db_tx);
+                    }
 
                     ui.separator();
 
@@ -923,6 +1139,32 @@ impl QueryPanel {
                             .clicked()
                         {
                             self.nl_bar_visible = !self.nl_bar_visible;
+                        }
+                        let can_assist = !self.ai_pending && !self.sql.trim().is_empty();
+                        ui.add_enabled_ui(can_assist, |ui| {
+                            ui.menu_button("✦ ▾", |ui| {
+                                if ui.button(i18n.ai_menu_explain()).clicked() {
+                                    self.request_ai_assist(AiTask::Explain, ui.ctx());
+                                    ui.close_menu();
+                                }
+                                if ui.button(i18n.ai_menu_optimize()).clicked() {
+                                    self.request_ai_assist(AiTask::Optimize, ui.ctx());
+                                    ui.close_menu();
+                                }
+                                if ui
+                                    .add_enabled(self.last_error.is_some(), egui::Button::new(i18n.ai_menu_fix()))
+                                    .on_disabled_hover_text(i18n.ai_hover_fix_disabled())
+                                    .clicked()
+                                {
+                                    self.request_ai_assist(AiTask::FixError, ui.ctx());
+                                    ui.close_menu();
+                                }
+                            })
+                            .response
+                            .on_hover_text(i18n.ai_hover_assist_menu());
+                        });
+                        if self.ai_pending && !self.nl_bar_visible {
+                            ui.spinner();
                         }
                     }
                 });
@@ -965,7 +1207,7 @@ impl QueryPanel {
                 // TextEdit sees it, otherwise egui cycles focus to the next widget).
                 let prev_cursor_idx: usize = egui::TextEdit::load_state(
                     ui.ctx(),
-                    egui::Id::new("ferox_sql_editor"),
+                    self.editor_id,
                 )
                 .and_then(|s| s.cursor.char_range())
                 .map(|r| r.primary.index)
@@ -986,7 +1228,7 @@ impl QueryPanel {
                     ui.fonts(|f| f.layout_job(job))
                 };
                 let editor = egui::TextEdit::multiline(&mut self.sql)
-                    .id(egui::Id::new("ferox_sql_editor"))
+                    .id(self.editor_id)
                     .layouter(&mut layouter)
                     .desired_rows(6)
                     .desired_width(f32::INFINITY)
@@ -1007,14 +1249,14 @@ impl QueryPanel {
                 {
                     if let Some(mut state) = egui::TextEdit::load_state(
                         ui.ctx(),
-                        egui::Id::new("ferox_sql_editor"),
+                        self.editor_id,
                     ) {
                         let char_count = self.sql.chars().count();
                         state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
                             egui::text::CCursor::new(0),
                             egui::text::CCursor::new(char_count),
                         )));
-                        state.store(ui.ctx(), egui::Id::new("ferox_sql_editor"));
+                        state.store(ui.ctx(), self.editor_id);
                     }
                 }
 
@@ -1028,13 +1270,13 @@ impl QueryPanel {
                         let new_char = byte_to_char_idx(&self.sql, word_start + accepted.len());
                         if let Some(mut state) = egui::TextEdit::load_state(
                             ui.ctx(),
-                            egui::Id::new("ferox_sql_editor"),
+                            self.editor_id,
                         ) {
                             let ccursor = egui::text::CCursor::new(new_char);
                             state.cursor.set_char_range(Some(
                                 egui::text::CCursorRange::one(ccursor),
                             ));
-                            state.store(ui.ctx(), egui::Id::new("ferox_sql_editor"));
+                            state.store(ui.ctx(), self.editor_id);
                         }
                     }
                     resp.request_focus();
@@ -1043,7 +1285,7 @@ impl QueryPanel {
                 // Get cursor position from this frame's TextEdit state.
                 let cursor_idx: usize = egui::TextEdit::load_state(
                     ui.ctx(),
-                    egui::Id::new("ferox_sql_editor"),
+                    self.editor_id,
                 )
                 .and_then(|s| s.cursor.char_range())
                 .map(|r| r.primary.index)
@@ -1093,28 +1335,19 @@ impl QueryPanel {
                     let new_char = byte_to_char_idx(&self.sql, word_start + accepted.len());
                     if let Some(mut state) = egui::TextEdit::load_state(
                         ui.ctx(),
-                        egui::Id::new("ferox_sql_editor"),
+                        self.editor_id,
                     ) {
                         let ccursor = egui::text::CCursor::new(new_char);
                         state.cursor.set_char_range(Some(
                             egui::text::CCursorRange::one(ccursor),
                         ));
-                        state.store(ui.ctx(), egui::Id::new("ferox_sql_editor"));
+                        state.store(ui.ctx(), self.editor_id);
                     }
                     resp.request_focus();
                 }
 
-                if resp.has_focus()
-                    && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter))
-                    && !self.sql.trim().is_empty()
-                {
-                    self.browse = None;
-                    self.browse_result = false;
-                    history.push(self.sql.clone());
-                    let _ = history.save();
-                    self.set_running();
-                    self.send_execute(db_tx);
-                }
+                // Ctrl+Enter / F5 are handled globally in app.rs (execute_query) —
+                // handling Ctrl+Enter here as well ran the query twice.
             });
 
         ui.separator();
@@ -1659,17 +1892,25 @@ impl QueryPanel {
                                 ui.ctx().copy_text(format_as_tsv(result, &indices));
                             }
                         }
-                        if output.bulk_export_csv_requested || output.bulk_export_json_requested {
-                            let json = output.bulk_export_json_requested;
+                        let bulk_format = if output.bulk_export_csv_requested {
+                            Some((ExportFormat::Csv, "csv"))
+                        } else if output.bulk_export_json_requested {
+                            Some((ExportFormat::Json, "json"))
+                        } else if output.bulk_export_insert_requested {
+                            Some((ExportFormat::Insert { table: self.export_table_name() }, "sql"))
+                        } else {
+                            None
+                        };
+                        if let Some((format, ext)) = bulk_format {
                             if let Some(result) = &self.result {
-                                if let Some(path) = pick_save_path(if json { "json" } else { "csv" }) {
+                                if let Some(path) = pick_save_path(ext) {
                                     let columns = result.columns.clone();
                                     let rows: Vec<Vec<CellValue>> = self
                                         .selected_rows
                                         .iter()
                                         .filter_map(|&i| result.rows.get(i).cloned())
                                         .collect();
-                                    let _ = db_tx.send(DbCommand::ExportRows { columns, rows, path, json });
+                                    let _ = db_tx.send(DbCommand::ExportRows { columns, rows, path, format });
                                 }
                             }
                         }
@@ -1718,6 +1959,14 @@ impl QueryPanel {
                             |ui| {
                                 if ui.small_button(i18n.btn_clear()).clicked() {
                                     self.log.clear();
+                                }
+                                if ai_enabled
+                                    && self.last_error.is_some()
+                                    && ui
+                                        .add_enabled(!self.ai_pending, egui::Button::new(i18n.ai_menu_fix()).small())
+                                        .clicked()
+                                {
+                                    self.request_ai_assist(AiTask::FixError, ui.ctx());
                                 }
                             },
                         );
@@ -2536,6 +2785,7 @@ fn pick_save_path(ext: &str) -> Option<String> {
     let filter_name = match ext {
         "csv" => "CSV files",
         "json" => "JSON files",
+        "sql" => "SQL files",
         _ => "All files",
     };
     let default_name = format!(

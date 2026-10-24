@@ -20,7 +20,7 @@ Not: Cargo paket adı `ferox-pg` (crates.io yayını için, v0.2.9'da yeniden ad
 - **TLS**: native-tls + postgres-native-tls
 - **SSH**: russh 0.44
 - **Config**: serde + toml
-- **Export**: serde_json + manuel CSV
+- **Export**: serde_json + manuel CSV + INSERT (`db/query.rs::insert_statements`)
 - **File Dialog**: rfd 0.14 (native OS diyaloğu)
 - **SQL Highlighting**: sıfırdan yazılmış tokenizer — `src/ui/syntax.rs` (syntect yok)
 - **i18n**: sıfırdan yazılmış — `src/i18n.rs` (sıfır bağımlılık)
@@ -46,11 +46,14 @@ src/
 ├── i18n.rs           — Lang enum (En|Tr), I18n(pub Lang) newtype, ~100+ method
 ├── logger.rs         — crash log (panic hook)
 ├── secrets.rs        — OS keychain (DB/SSH şifreleri, AI API key) — `keyring` crate
+├── dbeaver.rs        — DBeaver bağlantı import'u (data-sources.json + AES ile şifreli credentials-config.json)
+├── update.rs         — GitHub releases güncelleme kontrolü (ayrı thread, mpsc, sadece sürüm karşılaştırır)
 ├── db/
 │   ├── mod.rs
 │   ├── connection.rs — DbCommand/DbEvent, db_worker, execute_query (simple_query)
 │   ├── query.rs      — CellValue enum, QueryResult
 │   ├── metadata.rs   — Schema/table/column/index/FK introspection
+│   ├── dump.rs       — Şema dump'ı (.sql, yapı ± veri) — katalogdan üretilir, pg_dump gerekmez
 │   └── ssh.rs        — SSH tunnel (russh)
 └── ui/
     ├── mod.rs
@@ -64,6 +67,7 @@ src/
     ├── er_diagram.rs     — ER diyagramı
     ├── autocomplete.rs   — Tablo/sütun otomatik tamamlama
     ├── import_dialog.rs  — CSV import onay diyaloğu (kolon isimleri CSV header'ından)
+    ├── dbeaver_dialog.rs — DBeaver import önizleme/seçim diyaloğu
     └── syntax.rs         — Sıfırdan SQL/JSON tokenizer (keyword/type/string/comment)
 ```
 
@@ -84,10 +88,17 @@ cargo build --release # ~6.9MB binary, LTO
 - Yeni UI widget'ları `src/ui/` altına koy
 - Yeni DB sorguları `src/db/metadata.rs` veya `src/db/query.rs`'e ekle
 - `DbCommand`/`DbEvent` enum'larını `src/db/connection.rs`'de tut
+- Ctrl+Enter / F5 sadece `app.rs::execute_query()`'den geçer (seçim varsa seçimi çalıştırır, safe
+  mode uygular) — panel içinde ikinci bir Ctrl+Enter handler'ı ekleme, sorgu iki kez çalışır
+- `DbCommand::ExecuteDdl` `batch_execute` (simple query) kullanır: çok statement'lı script tek
+  implicit transaction'dır — tablo yapı editörünün DDL'i ya tamamen uygulanır ya hiç
 - Tüm sorgular `execute_query()` üzerinden geçmeli → `simple_query` protokol
   - **Tek istisna:** `DbCommand::ImportCsv` (CSV import, `import_csv()` fonksiyonu) —
     tokio-postgres'in `copy_in()`'i her zaman extended protokol (`prepare()`) kullanır,
     `simple_query` üzerine bindirilemez. Bilinçli ve dokümante edilmiş tek istisna.
+  - `DbCommand::DumpSchema` (`db/dump.rs`) `execute_query()`'yi atlar ama protokol yine
+    `simple_query`'dir: tek bir `REPEATABLE READ READ ONLY` transaction'da cursor + `FETCH` ile
+    satırları ham metin olarak akıtır (50k cap'i ve `parse_text_cell` dönüşümü uygulanmaz).
 
 ## execute_query Kritik Notlar
 - Tüm SQL'ler (SELECT, DML, DDL) `simple_query` ile çalışır — noktalı virgül ve çoklu statement desteklenir
@@ -130,15 +141,21 @@ cargo build --release # ~6.9MB binary, LTO
 - **Faz 14**: Operatör tabanlı WHERE filtre builder, toplu satır seçimi/kopyalama/export/silme,
   Duplicate Row, bağlantı renk etiketi (tab/switcher), şifre+API key OS keychain'e taşındı
   (`keyring`), JSON/JSONB pretty-print (View Full Value popup), CSV import (`COPY FROM STDIN`) ✓
+- **Faz 15**: Seçili SQL'i çalıştırma, AI Explain/Optimize/Fix error, ALTER destekli tablo yapı
+  editörü (DDL önizleme, tek transaction), şema dump'ı (pg_dump'sız), INSERT export, DBeaver
+  bağlantı import'u, GitHub releases güncelleme kontrolü; Ctrl+Enter çift çalıştırma düzeltmesi, v0.3.1 ✓
 
 ## AI Modülü (src/ai.rs)
 - `AiHandle::spawn()` — ayrı std::thread + kendi current_thread tokio runtime'ı
-- `AiCommand::NlToSql { prompt, schema_context }` / `AiCommand::SetConfig(AiConfig)`
-- `AiEvent::Thinking` / `AiEvent::SqlGenerated(String)` / `AiEvent::Error(String)`
+- `AiCommand::NlToSql { prompt, schema_context }` / `AiCommand::Assist { task, sql, error, schema_context }` / `AiCommand::SetConfig(AiConfig)`
+- `AiTask`: `Explain` | `Optimize` | `FixError` — yanıt `<sql>…</sql><explanation>…</explanation>` formatında, `parse_assist_response()` ayrıştırır
+- `AiEvent::Thinking` / `AiEvent::SqlGenerated(String)` / `AiEvent::AssistDone(AiAssistResult)` / `AiEvent::Error(String)`
+- AI'ın önerdiği SQL asla otomatik çalıştırılmaz: öneri penceresi gösterir, `new_write_operations()` orijinalde olmayan yazma işlemlerini (DELETE/DROP/…) uyarı olarak işaretler; "Editördekiyle değiştir" eski SQL'i önce history'e yazar
 - `call_claude()` → Anthropic Messages API (`/v1/messages`)
 - `call_openai_compat()` → OpenAI-compatible (`/v1/chat/completions`) — Groq/Ollama/OpenAI/custom
 - Schema context: `DbCommand::LoadFullSchemaForAi` → `metadata::load_full_schema_for_ai()` → `information_schema.columns` → `DbEvent::AiSchemaReady`
-- Two-step flow: nl_submit → LoadFullSchemaForAi → AiSchemaReady → NlToSql
+- Two-step flow: nl_submit / ai_assist_submit → LoadFullSchemaForAi → AiSchemaReady → NlToSql / Assist (`app.rs::PendingAi`)
+- Assist istekleri şema context'ine index tanımlarını da ekler (`with_indexes: true`); NL→SQL token tasarrufu için eklemez
 
 ## Kalan İşler
 Şu an açık madde yok.

@@ -37,6 +37,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: ferox-windows-x64.exe
+          body_path: RELEASE_NOTES_${{ github.ref_name }}.md
 
   # ── macOS Universal (Intel + Apple Silicon) ──────────────────────────────────
   build-macos:

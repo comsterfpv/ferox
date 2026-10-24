@@ -4,12 +4,14 @@ mod ai;
 mod app;
 mod config;
 mod db;
+mod dbeaver;
 mod history;
 mod i18n;
 mod logger;
 mod secrets;
 mod snippets;
 mod ui;
+mod update;
 
 use app::PgClientApp;
 

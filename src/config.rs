@@ -231,6 +231,10 @@ fn default_null_color() -> [u8; 3] {
     [128, 100, 100]
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -242,6 +246,12 @@ pub struct AppConfig {
     /// RGB color used to render `<null>` cells in the result table.
     #[serde(default = "default_null_color")]
     pub null_color: [u8; 3],
+    /// Ask GitHub for a newer release once at startup (Settings → toggle).
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
+    /// Release the user chose "Skip this version" for — not announced again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_version: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -251,6 +261,8 @@ impl Default for AppConfig {
             language: Lang::default(),
             ai: AiConfig::default(),
             null_color: default_null_color(),
+            check_updates: true,
+            skipped_version: None,
         }
     }
 }

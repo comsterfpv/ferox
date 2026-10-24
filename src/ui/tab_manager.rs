@@ -348,10 +348,6 @@ impl TabManager {
 
     // ── Public API — delegates to active / running tab ────────────────────────
 
-    pub fn current_sql(&self) -> &str {
-        self.active_panel().map(|p| p.current_sql()).unwrap_or("")
-    }
-
     pub fn set_sql(&mut self, sql: String) {
         if let Some(p) = self.active_panel_mut() {
             p.set_sql(sql);
@@ -453,6 +449,19 @@ impl TabManager {
         }
     }
 
+    /// SQL for a Ctrl+Enter / F5 run of the active tab (its selection, or the
+    /// whole editor) — also leaves browse mode. `None` if there's nothing to run.
+    pub fn take_run_sql(&mut self, ctx: &egui::Context) -> Option<String> {
+        self.active_panel_mut()?.take_run_sql(ctx)
+    }
+
+    /// Append an info line to the active tab's Messages log.
+    pub fn log_info(&mut self, msg: String) {
+        if let Some(p) = self.active_panel_mut() {
+            p.log_info(msg);
+        }
+    }
+
     pub fn set_import_done(&mut self, rows: u64) {
         if let Some(p) = self.active_panel_mut() {
             p.set_import_done(rows);
@@ -468,6 +477,18 @@ impl TabManager {
     pub fn set_active_ai_result(&mut self, sql: String) {
         if let Some(p) = self.active_panel_mut() {
             p.set_ai_result(sql);
+        }
+    }
+
+    /// Take the pending Explain / Optimize / Fix request from the active panel.
+    pub fn take_active_ai_assist(&mut self) -> Option<(crate::ai::AiTask, String, Option<String>)> {
+        self.active_panel_mut()?.ai_assist_submit.take()
+    }
+
+    /// Deliver an Explain / Optimize / Fix answer to the active panel.
+    pub fn set_active_ai_assist_result(&mut self, result: crate::ai::AiAssistResult) {
+        if let Some(p) = self.active_panel_mut() {
+            p.set_ai_assist_result(result);
         }
     }
 

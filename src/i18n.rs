@@ -597,6 +597,60 @@ impl I18n {
         self.t("No changes detected.", "Değişiklik bulunamadı.")
     }
     pub fn td_col_default(&self) -> &'static str { self.t("Default", "Varsayılan") }
+    pub fn td_hover_rename_table(&self) -> &'static str { self.t("Edit to rename the table", "Tabloyu yeniden adlandırmak için düzenleyin") }
+    pub fn td_lbl_indexes(&self) -> &'static str { self.t("Indexes", "Index'ler") }
+    pub fn td_btn_add_index(&self) -> &'static str { self.t("+ Add index", "+ Index ekle") }
+    pub fn td_lbl_constraint(&self, name: &str) -> String {
+        match self.0 {
+            Lang::En => format!("constraint {name}"),
+            Lang::Tr => format!("constraint {name}"),
+        }
+    }
+    pub fn td_col_index_cols(&self) -> &'static str { self.t("Columns / expressions", "Kolonlar / ifadeler") }
+    pub fn td_col_method(&self) -> &'static str { self.t("Method", "Yöntem") }
+    pub fn td_hint_index_auto_name(&self) -> &'static str { self.t("(auto)", "(otomatik)") }
+    pub fn td_lbl_no_changes_yet(&self) -> &'static str {
+        self.t("No changes yet — the generated DDL will appear here.", "Henüz değişiklik yok — üretilen DDL burada görünecek.")
+    }
+    pub fn td_lbl_ddl_preview(&self) -> &'static str { self.t("DDL to run:", "Çalıştırılacak DDL:") }
+    pub fn td_note_single_transaction(&self) -> &'static str {
+        self.t("Runs as a single transaction — all statements succeed or none do.", "Tek transaction olarak çalışır — ya hepsi uygulanır ya hiçbiri.")
+    }
+    pub fn td_warn_header(&self) -> &'static str { self.t("⚠ Destructive / risky changes:", "⚠ Yıkıcı / riskli değişiklikler:") }
+    pub fn td_warn_drop_col(&self, col: &str) -> String {
+        match self.0 {
+            Lang::En => format!("column \"{col}\" and all its data will be dropped"),
+            Lang::Tr => format!("\"{col}\" kolonu ve tüm verisi silinecek"),
+        }
+    }
+    pub fn td_warn_type_change(&self, col: &str, from: &str, to: &str) -> String {
+        match self.0 {
+            Lang::En => format!("\"{col}\": {from} → {to} rewrites the table and fails if a value can't be cast"),
+            Lang::Tr => format!("\"{col}\": {from} → {to} tabloyu yeniden yazar, dönüştürülemeyen değer varsa başarısız olur"),
+        }
+    }
+    pub fn td_warn_set_not_null(&self, col: &str) -> String {
+        match self.0 {
+            Lang::En => format!("\"{col}\" SET NOT NULL fails if any row is NULL"),
+            Lang::Tr => format!("\"{col}\" SET NOT NULL, NULL değerli satır varsa başarısız olur"),
+        }
+    }
+    pub fn td_warn_drop_index(&self, name: &str) -> String {
+        match self.0 {
+            Lang::En => format!("index/constraint \"{name}\" will be dropped"),
+            Lang::Tr => format!("\"{name}\" index/constraint'i silinecek"),
+        }
+    }
+    pub fn td_btn_open_in_editor(&self) -> &'static str { self.t("Open in Editor", "Editörde Aç") }
+    pub fn td_err_col_renamed_empty(&self, col: &str) -> String {
+        match self.0 {
+            Lang::En => format!("New name for column \"{col}\" is empty."),
+            Lang::Tr => format!("\"{col}\" kolonunun yeni adı boş."),
+        }
+    }
+    pub fn td_err_index_cols_required(&self) -> &'static str {
+        self.t("Each new index needs at least one column or expression.", "Her yeni index en az bir kolon veya ifade içermeli.")
+    }
 
     // ── Settings / About ──────────────────────────────────────────────────────
     pub fn menu_settings(&self) -> &'static str { self.t("Settings", "Ayarlar") }
@@ -635,4 +689,128 @@ impl I18n {
     pub fn col_stats_loading(&self) -> &'static str {
         self.t("Loading statistics…", "İstatistikler yükleniyor…")
     }
+
+    // ── Run selection / INSERT export ─────────────────────────────────────────
+
+    pub fn btn_run_selection(&self) -> &'static str { self.t("▶ Run Selection", "▶ Seçimi Çalıştır") }
+    pub fn hover_export_insert(&self) -> &'static str {
+        self.t("Export as INSERT statements…", "INSERT ifadeleri olarak dışa aktar…")
+    }
+    pub fn btn_bulk_export_insert(&self) -> &'static str {
+        self.t("Export Selected as INSERT…", "Seçilenleri INSERT Olarak Dışa Aktar…")
+    }
+
+    // ── Schema dump ───────────────────────────────────────────────────────────
+
+    pub fn schema_menu_dump_full(&self) -> &'static str {
+        self.t("💾  Dump schema (structure + data)…", "💾  Şemayı dök (yapı + veri)…")
+    }
+    pub fn schema_menu_dump_structure(&self) -> &'static str {
+        self.t("💾  Dump schema (structure only)…", "💾  Şemayı dök (sadece yapı)…")
+    }
+    pub fn log_dump_started(&self, schema: &str) -> String {
+        match self.0 {
+            Lang::En => format!("Dumping schema \"{schema}\"…"),
+            Lang::Tr => format!("\"{schema}\" şeması dökülüyor…"),
+        }
+    }
+    pub fn log_dump_done(&self, path: &str, tables: usize, rows: u64) -> String {
+        match self.0 {
+            Lang::En => format!("Dump written → {path} ({tables} table(s), {rows} row(s))"),
+            Lang::Tr => format!("Dump yazıldı → {path} ({tables} tablo, {rows} satır)"),
+        }
+    }
+    pub fn err_dump_in_transaction(&self) -> &'static str {
+        self.t(
+            "Commit or roll back the open transaction before dumping.",
+            "Dump almadan önce açık transaction'ı commit veya rollback edin.",
+        )
+    }
+
+    // ── AI Explain / Optimize / Fix ───────────────────────────────────────────
+
+    pub fn ai_menu_explain(&self) -> &'static str { self.t("Explain query", "Sorguyu açıkla") }
+    pub fn ai_menu_optimize(&self) -> &'static str { self.t("Optimize query", "Sorguyu optimize et") }
+    pub fn ai_menu_fix(&self) -> &'static str { self.t("✦ Fix error with AI", "✦ Hatayı AI ile düzelt") }
+    pub fn ai_hover_fix_disabled(&self) -> &'static str {
+        self.t("Available after a query fails", "Bir sorgu hata verdikten sonra kullanılabilir")
+    }
+    pub fn ai_hover_assist_menu(&self) -> &'static str {
+        self.t(
+            "AI: explain / optimize / fix the query (the selection, if any)",
+            "AI: sorguyu açıkla / optimize et / düzelt (varsa seçim)",
+        )
+    }
+    pub fn ai_title_explain(&self) -> &'static str { self.t("✦ AI — Explanation", "✦ AI — Açıklama") }
+    pub fn ai_title_optimize(&self) -> &'static str { self.t("✦ AI — Optimized query", "✦ AI — Optimize edilmiş sorgu") }
+    pub fn ai_title_fix(&self) -> &'static str { self.t("✦ AI — Fixed query", "✦ AI — Düzeltilmiş sorgu") }
+    pub fn ai_warn_new_writes(&self, ops: &str) -> String {
+        match self.0 {
+            Lang::En => format!("⚠ The suggestion adds operations the original didn't have: {ops} — review before running."),
+            Lang::Tr => format!("⚠ Öneri, orijinalde olmayan işlemler ekliyor: {ops} — çalıştırmadan önce inceleyin."),
+        }
+    }
+    pub fn ai_btn_replace(&self) -> &'static str { self.t("Replace in editor", "Editördekiyle değiştir") }
+    pub fn ai_btn_copy_sql(&self) -> &'static str { self.t("Copy SQL", "SQL'i kopyala") }
+    pub fn ai_btn_copy_text(&self) -> &'static str { self.t("Copy text", "Metni kopyala") }
+    pub fn ai_no_change(&self) -> &'static str {
+        self.t("No rewrite suggested — the query is fine as is.", "Yeniden yazım önerilmedi — sorgu olduğu gibi uygun.")
+    }
+
+    // ── Update check ──────────────────────────────────────────────────────────
+
+    pub fn menu_check_updates_startup(&self) -> &'static str {
+        self.t("Check for updates on startup", "Açılışta güncellemeleri denetle")
+    }
+    pub fn menu_check_updates_now(&self) -> &'static str { self.t("Check for updates now", "Güncellemeleri şimdi denetle") }
+    pub fn update_checking(&self) -> &'static str { self.t("Checking for updates…", "Güncellemeler denetleniyor…") }
+    pub fn update_up_to_date(&self, current: &str) -> String {
+        match self.0 {
+            Lang::En => format!("✓ ferox {current} is the latest version."),
+            Lang::Tr => format!("✓ ferox {current} en güncel sürüm."),
+        }
+    }
+    pub fn update_available(&self, latest: &str, current: &str) -> String {
+        match self.0 {
+            Lang::En => format!("⬆ ferox {latest} is available (you have {current})."),
+            Lang::Tr => format!("⬆ ferox {latest} yayınlandı (sizdeki: {current})."),
+        }
+    }
+    pub fn update_failed(&self, err: &str) -> String {
+        match self.0 {
+            Lang::En => format!("Update check failed: {err}"),
+            Lang::Tr => format!("Güncelleme denetimi başarısız: {err}"),
+        }
+    }
+    pub fn update_btn_release_notes(&self) -> &'static str { self.t("Release notes / download", "Sürüm notları / indir") }
+    pub fn update_btn_skip(&self) -> &'static str { self.t("Skip this version", "Bu sürümü atla") }
+
+    // ── DBeaver import ────────────────────────────────────────────────────────
+
+    pub fn menu_import_dbeaver(&self) -> &'static str { self.t("Import from DBeaver…", "DBeaver'dan İçe Aktar…") }
+    pub fn dbeaver_title(&self) -> &'static str { self.t("Import from DBeaver", "DBeaver'dan İçe Aktar") }
+    pub fn dbeaver_not_found(&self) -> &'static str {
+        self.t(
+            "No DBeaver workspace found. Choose a data-sources.json file.",
+            "DBeaver çalışma alanı bulunamadı. Bir data-sources.json dosyası seçin.",
+        )
+    }
+    pub fn dbeaver_none_pg(&self) -> &'static str {
+        self.t("No PostgreSQL connections found.", "PostgreSQL bağlantısı bulunamadı.")
+    }
+    pub fn dbeaver_exists(&self) -> &'static str { self.t("already exists", "zaten var") }
+    pub fn dbeaver_no_password(&self) -> &'static str { self.t("no saved password", "kayıtlı şifre yok") }
+    pub fn dbeaver_skipped_other(&self, n: usize) -> String {
+        match self.0 {
+            Lang::En => format!("{n} non-PostgreSQL connection(s) skipped."),
+            Lang::Tr => format!("PostgreSQL olmayan {n} bağlantı atlandı."),
+        }
+    }
+    pub fn dbeaver_import_n(&self, n: usize) -> String {
+        match self.0 {
+            Lang::En => format!("Import {n}"),
+            Lang::Tr => format!("{n} bağlantıyı aktar"),
+        }
+    }
+    pub fn dbeaver_choose_file(&self) -> &'static str { self.t("Choose file…", "Dosya seç…") }
 }

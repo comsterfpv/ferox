@@ -35,6 +35,8 @@ pub enum SidebarAction {
     GenerateScript { schema: String, table: String, kind: ScriptKind },
     /// Import a local CSV file into schema.table via COPY FROM STDIN.
     ImportCsv { schema: String, table: String },
+    /// Dump a whole schema to a .sql file (app.rs asks for the path).
+    DumpSchema { schema: String, with_data: bool },
 }
 
 // ── Script generation helpers (pub — used by app.rs when details arrive) ─────
@@ -275,6 +277,12 @@ impl Sidebar {
         self.tables_loaded_at.insert(schema.to_owned(), Instant::now());
         self.refreshing.remove(schema);
         self.completion_dirty = true;
+    }
+
+    /// Forget cached columns/indexes for a table (after its structure changed),
+    /// so the next expand / edit loads them fresh.
+    pub fn invalidate_table_details(&mut self, schema: &str, table: &str) {
+        self.table_details.remove(&(schema.to_owned(), table.to_owned()));
     }
 
     pub fn schema_names(&self) -> Vec<String> {
@@ -566,6 +574,22 @@ impl Sidebar {
                             });
                             ui.close_menu();
                         }
+                        ui.separator();
+                        if ui.button(i18n.schema_menu_dump_full()).clicked() {
+                            actions.push(SidebarAction::DumpSchema {
+                                schema: schema_name_for_menu.clone(),
+                                with_data: true,
+                            });
+                            ui.close_menu();
+                        }
+                        if ui.button(i18n.schema_menu_dump_structure()).clicked() {
+                            actions.push(SidebarAction::DumpSchema {
+                                schema: schema_name_for_menu.clone(),
+                                with_data: false,
+                            });
+                            ui.close_menu();
+                        }
+                        ui.separator();
                         if ui.button(i18n.schema_menu_refresh()).clicked() {
                             self.functions.remove(&schema_name_for_menu);
                             self.sequences.remove(&schema_name_for_menu);

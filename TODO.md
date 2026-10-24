@@ -2,11 +2,29 @@
 
 ## Aktif
 
-Şu an açık madde yok.
+### Sonraki adaylar (dbx karşılaştırmasından)
+- [ ] XLSX export
+- [ ] Uygulama yeniden açılınca tab'ları geri yükleme
+- [ ] Veri karşılaştırma (data compare) + senkronizasyon SQL'i
+- [ ] DB/AI için proxy ayarı
+- [ ] Sidebar'da tablo sabitleme (pin) + DB genelinde nesne arama
+- [ ] Ek editör temaları
+- [ ] Toolbar Run butonu safe mode'u atlıyor (Ctrl+Enter/F5 uyguluyor) — aynı yola bağla
+- [ ] `parse_text_cell` kayıplı (`007` → 7, `1.50` → 1.5) — CSV/JSON/INSERT export'u etkiliyor
 
 ---
 
 ## Tamamlanan
+
+### Faz 15 — v0.3.1 (dbx karşılaştırmasından çıkan eksikler) ✓
+- [x] Sadece seçili SQL'i çalıştırma (Ctrl+Enter / F5 / Run / Explain)
+- [x] AI ile Explain / Optimize / Fix error (`AiCommand::Assist`)
+- [x] Tablo yapı editörü (ALTER — DDL önizlemeli, tek transaction)
+- [x] Şema dump'ı (.sql) — yapı veya yapı+veri, `pg_dump` gerektirmeden
+- [x] Sonucu INSERT statement olarak export (toolbar + seçili satırlar)
+- [x] DBeaver bağlantılarını içe aktarma (şifreler dahil)
+- [x] Uygulama içi güncelleme kontrolü (GitHub releases)
+- [x] Ctrl+Enter'ın sorguyu iki kez çalıştırması düzeltildi
 
 ### Faz 14 — Toplu İşlemler, Filtre Builder, Şifre Şifreleme, JSON, CSV Import ✓
 - [x] Çoklu satır seçimi (Shift+Click aralık, Ctrl+Click toggle) — sonuç grid'inde
