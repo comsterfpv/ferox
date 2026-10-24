@@ -21,25 +21,31 @@
 
 ---
 
-> **Ferox** runs under 50 MB and starts in under 200 ms — because your database client shouldn't be the bottleneck.
+> **Ferox** is a native PostgreSQL client in a ~10 MB binary, idling at ~40–55 MB of RAM and starting in under 200 ms — because your database client shouldn't be the bottleneck.
 
 ---
 
 ## Screenshots
 
-| Main editor | Dashboard |
-|:-----------:|:---------:|
-| ![Main screen](screenshots/main_screen.png) | ![Dashboard](screenshots/dashboard.png) |
+*All screenshots use a fictional demo database — recreate it with [`scripts/demo_db.py`](scripts/demo_db.py).*
 
-| EXPLAIN ANALYZE | Join Builder |
-|:---------------:|:------------:|
-| ![Explain](screenshots/explain_screen.png) | ![Join Builder](screenshots/join_builder.png) |
+| Query editor | EXPLAIN ANALYZE visualizer |
+|:------------:|:--------------------------:|
+| ![Query editor](screenshots/main_screen.png) | ![EXPLAIN visualizer](screenshots/explain_screen.png) |
+
+| Table structure editor (DDL preview) | Browse mode — filter builder & bulk actions |
+|:------------------------------------:|:-------------------------------------------:|
+| ![Structure editor](screenshots/structure_editor.png) | ![Browse mode](screenshots/browse_bulk.png) |
+
+| ER diagram | Database dashboard |
+|:----------:|:------------------:|
+| ![ER diagram](screenshots/er_diagram.png) | ![Dashboard](screenshots/dashboard.png) |
 
 <div align="center">
 
-![Menu](screenshots/main_menu.png)
+![Join Builder](screenshots/join_builder.png)
 
-*Settings → Language for EN/TR switch · Settings → About*
+*Join Builder — compose multi-table JOINs visually*
 
 </div>
 
@@ -47,15 +53,21 @@
 
 ## Features
 
-### ✨ AI — Natural Language to SQL
+### ✨ AI — Natural Language to SQL, Explain, Optimize & Fix
 
-Press **`Ctrl+I`** (or the `AI` button in the toolbar) to open the NL bar. Type plain English — Ferox fetches the live schema from your DB and sends it to the AI, so the generated query always uses your real tables and columns.
+Click the **✦ AI** button in the toolbar to open the NL bar. Type plain English — Ferox fetches the live schema from your DB and sends it to the AI, so the generated query always uses your real tables and columns.
 
 ```
 "show me the top 10 customers by total order value in the last 30 days"
 ```
 
-Ferox sends the full live schema as context — the AI sees every table, column, and type in the connected database. No hallucinated table names.
+The **✦ ▾** menu next to it works on the query in the editor (or just the selection):
+
+- **Explain query** — a plain-language walkthrough: what it returns, how tables are joined, and pitfalls (NULL handling, join fan-out, missing `LIMIT`)
+- **Optimize query** — a faster rewrite with the same result; the AI also sees your **indexes**, and suggests a `CREATE INDEX` when that would help more
+- **Fix error with AI** — after a query fails, sends the query plus the Postgres error and returns a minimal fix with the cause explained (also offered in the Messages tab)
+
+AI-generated SQL is **never run automatically** — it opens in a review window. If a suggestion adds a write operation the original didn't have (`DELETE`, `DROP`, `UPDATE`, …), a red warning names it. *Replace in editor* saves your original query to history first.
 
 **Supported providers** (configure via `Settings → AI`):
 
@@ -67,43 +79,54 @@ Ferox sends the full live schema as context — the AI sees every table, column,
 | **OpenAI** | `gpt-4o-mini` by default |
 | **Custom / OpenRouter** | Any OpenAI-compatible endpoint via base URL override |
 
-The generated SQL is placed directly in the active query editor — review it, tweak it, run it.
-
 ---
 
 ### Core
 - **Multi-tab query editor** — Ctrl+T new tab, Ctrl+W close, right-click for Close / Close Others / Close All
+- **Run selection** — select part of the editor and F5 / Ctrl+Enter / Run / Explain execute only that
 - **Per-table tabs** — clicking a table opens it in its own tab; existing tabs are reused
-- **Schema browser** — lazy-loaded tree: schemas → tables / views / mat-views / foreign tables, live filter
+- **Schema browser** — lazy-loaded tree: schemas → tables / views / mat-views / foreign tables / functions / sequences / triggers, live filter
 - **Data browser** — double-click any table or view to browse with server-side pagination & ORDER BY
 - **Structured filter builder** — pick a column/operator/value (`=, !=, >, <, LIKE, ILIKE, IS NULL, IN`, …) in browse mode, or type a raw `WHERE` fragment directly
-- **Multi-row selection & bulk actions** — Shift/Ctrl+Click to select rows, then bulk **copy / export as CSV or JSON / delete** (confirmation dialog, PK-based)
+- **Multi-row selection & bulk actions** — Shift/Ctrl+Click to select rows, then bulk **copy / export as CSV, JSON or INSERT / delete** (confirmation dialog, PK-based)
 - **Duplicate Row** — right-click a row to INSERT a copy, auto-omitting primary-key columns
 - **Inline editing** — double-click a cell to edit, Enter to commit, Escape to cancel
 - **JSON/JSONB pretty-print** — the cell value popup detects JSON, pretty-prints and syntax-highlights it, with a Pretty/Raw toggle
 - **Persistent query history** — last 500 queries, searchable, click to reload
+- **Saved queries** — Ctrl+Shift+S saves the editor under a name; searchable Saved tab
+
+### Schema & Data Tools
+- **Table structure editor** — rename columns, change types (automatic `USING` cast), set/drop `NOT NULL` and `DEFAULT`, add/drop columns, add/drop indexes (PK/UNIQUE-backed ones via `DROP CONSTRAINT`), rename the table. The exact DDL is always previewed, risky changes are flagged in red, and everything applies as **one transaction** — or open it in the editor instead
+- **Schema dump** — right-click a schema → dump structure + data (or structure only) to a `.sql` file. No `pg_dump` needed, works through the SSH tunnel; consistent snapshot, rows streamed through a cursor (types, sequences, functions, partitions, constraints, indexes, views, matviews, triggers — not owners/grants/RLS/comments). PostgreSQL 12+
+- **CSV import** — right-click a table → Import CSV…; columns are read from the file's header and streamed in via `COPY FROM STDIN`
+- **Export** — CSV, JSON and **INSERT statements** via native OS file dialog; copy results as Markdown/HTML
+- **View DDL** — right-click any view or materialized view → Show DDL
+- **Script generation** — right-click table → Generate SELECT / INSERT / UPDATE / DELETE scripts
+- **ER diagram** — visual schema relationship viewer with FK arrows, pan/zoom, draggable nodes
+- **Schema diff** — compare the structure of two connections/schemas
+- **Column statistics** — right-click any column header → null %, distinct count, min/max length, top values (computed on the database in browse mode)
 
 ### Query Tools
 - **Multi-statement execution** — `;`-separated statements run in sequence; each SELECT result opens in its own tab
-- **View DDL** — right-click any view or materialized view → Show DDL
-- **EXPLAIN visualizer** — tree view of query plans with cost, rows, and timing per node; optimization suggestions
+- **EXPLAIN visualizer** — tree view of query plans with cost, rows, and timing per node; slowest-node highlight and optimization suggestions
 - **Safe mode transactions** — DML wrapped in explicit BEGIN/COMMIT/ROLLBACK
-- **Export** — CSV & JSON via native OS file dialog (no temp files)
-- **CSV import** — right-click a table → Import CSV…; columns are read from the file's header and streamed in via `COPY FROM STDIN`
-- **Script generation** — right-click table → Generate SELECT / INSERT / UPDATE / DELETE scripts
 - **Join Builder** — visual multi-table JOIN composer (`Query → Join Builder…`)
-- **Column statistics** — right-click any column header → null %, distinct count, min/max length, top values
+- **SQL formatting** — Shift+Alt+F
+- **Find in results** — Ctrl+F highlights matching cells
 
-### Developer Experience
-- **SQL syntax highlighting** — zero-dependency tokenizer, dark (`base16-ocean.dark`) and light (`InspiredGitHub`) themes
-- **SQL autocomplete** — table names, column names, keywords
-- **Connection profiles** — saved to `config.toml` (see [Configuration](#configuration)); SSL modes + SSH tunnel supported
+### Connections & Security
+- **Connection profiles** — saved to `config.toml` (see [Configuration](#configuration)); SSL modes + SSH tunnel (password or private key)
+- **Import from DBeaver** — `Connection → Import from DBeaver…` finds your DBeaver workspace and imports PostgreSQL connections with passwords, SSH, SSL mode, folders and prod/test color; duplicates are detected
 - **Credentials in the OS keychain** — connection/SSH passwords and the AI API key are stored via Windows Credential Manager / macOS Keychain / Linux Secret Service, not as plain text
 - **Connection color tags** — flag a connection red/yellow/green/blue (e.g. "Production") so it stands out on the tab bar and connection switcher
 - **Multiple simultaneous connections** — per-connection sidebar, tabs, and DB threads
-- **ER diagram** — visual schema relationship viewer with FK arrows, pan/zoom, draggable nodes
+- **Auto-reconnect** — a dropped connection is re-established on the next command
+
+### Developer Experience
+- **SQL syntax highlighting** — zero-dependency tokenizer, dark (`base16-ocean.dark`) and light (`InspiredGitHub`) themes
+- **SQL autocomplete** — table names (with alias suggestions), column names, keywords; Ctrl+Space to force
 - **Database dashboard** — table sizes, index stats, active connections with kill support
-- **F5 / Ctrl+Enter** to run, **Ctrl+C** to cancel mid-query
+- **Update check** — a banner tells you when a new release is out (one GitHub API request at startup on a background thread; nothing is downloaded automatically). Turn it off under `Settings → Check for updates on startup`
 - **EN / TR localisation** — full bilingual UI; language choice persists to config
 
 ---
@@ -112,12 +135,12 @@ The generated SQL is placed directly in the active query editor — review it, t
 
 | Metric | Ferox |
 |--------|-------|
-| RAM at idle | **~45 MB** |
+| RAM at idle | **~40–55 MB** (working set) |
 | Cold startup | **< 200 ms** |
-| Binary size | **~9.9 MB** |
+| Binary size | **~10.1 MB** |
 
-*Measured on Windows 10, release build with LTO. Binary size grew from ~7 MB after
-adding OS-keychain-backed credential storage (`keyring` crate) — its Windows backend
+*Measured on Windows 11, release build with LTO (v0.3.1). The binary grew from ~7 MB
+after adding OS-keychain-backed credential storage (`keyring` crate) — its Windows backend
 pulls in a full regex engine. RAM/startup are unaffected (keychain I/O only happens
 on connect/save, never per-frame).*
 
@@ -175,7 +198,7 @@ Binary lands at `target/release/ferox` (or `ferox.exe` on Windows).
 
 ### Running a query
 
-Type SQL in the editor, press `F5` or `Ctrl+Enter`.
+Type SQL in the editor, press `F5` or `Ctrl+Enter`. Select part of the text first to run only that.
 
 ```sql
 SELECT u.name, COUNT(o.id) AS orders
@@ -191,12 +214,16 @@ Or use the **Join Builder** (`Query → Join Builder…`) to construct joins vis
 
 | Shortcut | Action |
 |----------|--------|
-| `F5` / `Ctrl+Enter` | Run query |
+| `F5` / `Ctrl+Enter` | Run query (or the selection) |
 | `Ctrl+C` | Cancel running query |
 | `Ctrl+T` | New tab |
 | `Ctrl+W` | Close tab |
-| `Ctrl+Tab` | Next tab |
-| `Ctrl+Shift+Tab` | Previous tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+Shift+S` | Save query |
+| `Ctrl+Space` | Show autocomplete |
+| `Ctrl+A` | Select all in the editor |
+| `Shift+Alt+F` | Format SQL |
+| `Ctrl+F` | Find in results |
 | `F5` (sidebar focused) | Refresh schema tree |
 
 ---
@@ -214,6 +241,8 @@ Profiles are stored automatically (config file directory is still named `pgclien
 ```toml
 language = "en"          # "en" or "tr"
 null_color = [128, 100, 100]
+check_updates = true     # GitHub release check at startup
+# skipped_version = "0.3.2"  # set by "Skip this version" in the update banner
 
 [[connections]]
 name     = "prod-readonly"
@@ -258,6 +287,7 @@ Ferox uses three dedicated threads, zero shared mutable state between them:
 ```
 
 All communication goes through `mpsc` channels — the UI thread never blocks.
+The startup update check runs on a fourth, short-lived thread the same way.
 
 ---
 
@@ -276,6 +306,7 @@ All communication goes through `mpsc` channels — the UI thread never blocks.
 | Config | `serde` + `toml` |
 | File dialogs | [`rfd`](https://github.com/PolyMeilex/rfd) |
 | OS keychain | [`keyring`](https://github.com/open-source-cooperative/keyring-rs) |
+| DBeaver credential import | `aes` + `cbc` (already linked via `russh`) |
 
 ---
 
@@ -303,6 +334,17 @@ All communication goes through `mpsc` channels — the UI thread never blocks.
 - [x] **CSV import** — via a file picker (`Import CSV…`), not drag-and-drop
 - [x] **Connection color tags** — per-connection danger color, shown on tabs and the connection switcher
 - [x] **Credentials in the OS keychain** — passwords and API keys no longer stored as plain text
+- [x] **Run selection** — execute only the selected SQL
+- [x] **AI: Explain / Optimize / Fix error** — with index-aware context and a review step before anything runs
+- [x] **Table structure editor** — ALTER with live DDL preview, single transaction
+- [x] **Schema dump** — `.sql` export of structure ± data without `pg_dump`
+- [x] **Export as INSERT statements**
+- [x] **Import connections from DBeaver**
+- [x] **Update check** — GitHub releases banner
+- [ ] **XLSX export**
+- [ ] **Restore open tabs on restart**
+- [ ] **Data compare** — diff table contents and generate sync SQL
+- [ ] **Proxy settings** for DB and AI connections
 - [ ] **Dark / light theme toggle** — runtime switch
 - [ ] **Result diff** — compare two query results side-by-side
 
@@ -319,14 +361,19 @@ docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=test postgres:16
 # Dev build (faster compile, debug symbols)
 cargo build
 
-# Unit tests — pure logic (SQL builders, tokenizers, quoting), no DB required
+# Unit tests — pure logic (SQL builders, tokenizers, quoting, parsers), no DB required
 cargo test
 
-# Integration tests — require a reachable local Postgres and (for the keychain
-# test) an OS keychain backend; not run by default. Point them at your instance
+# Integration tests — not run by default. They need a reachable local Postgres
+# (CSV import, schema dump/restore round-trip, structure-editor DDL), the OS
+# keychain, and network access (GitHub releases API). Point them at your instance
 # with FEROX_TEST_PG_HOST/PORT/USER/PASSWORD/DATABASE (default: postgres/postgres
 # @localhost:5432/postgres) if it differs.
 cargo test -- --ignored
+
+# Demo database used for the screenshots
+pip install psycopg2-binary
+FEROX_DEMO_DSN="host=localhost user=postgres password=test" python scripts/demo_db.py
 ```
 
 Please keep the UI thread non-blocking and all DB work behind `DbCommand` / `DbEvent`.

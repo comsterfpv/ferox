@@ -386,37 +386,36 @@ impl TableDialog {
                                 let renamed = ec.renamed();
                                 let type_changed = ec.type_changed();
                                 let default_changed = ec.default_changed();
-                                ui.add_enabled(
-                                    enabled,
-                                    egui::TextEdit::singleline(&mut ec.name)
-                                        .desired_width(120.0)
-                                        .font(egui::TextStyle::Monospace)
-                                        .text_color_opt(tint(renamed)),
-                                );
-                                ui.horizontal(|ui| {
-                                    ui.add_enabled(
-                                        enabled,
-                                        egui::TextEdit::singleline(&mut ec.data_type)
-                                            .desired_width(150.0)
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    ui.add_sized(
+                                        [130.0, 20.0],
+                                        egui::TextEdit::singleline(&mut ec.name)
                                             .font(egui::TextStyle::Monospace)
-                                            .text_color_opt(tint(type_changed)),
+                                            .text_color_opt(tint(renamed)),
                                     );
-                                    ui.add_enabled_ui(enabled, |ui| {
+                                });
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            [170.0, 20.0],
+                                            egui::TextEdit::singleline(&mut ec.data_type)
+                                                .font(egui::TextStyle::Monospace)
+                                                .text_color_opt(tint(type_changed)),
+                                        );
                                         type_picker(ui, &format!("ec_type_{i}"), &mut ec.data_type);
                                     });
                                 });
+                                ui.add_enabled_ui(enabled, |ui| ui.checkbox(&mut ec.not_null, ""));
                                 ui.add_enabled_ui(enabled, |ui| {
-                                    ui.centered_and_justified(|ui| ui.checkbox(&mut ec.not_null, ""));
+                                    ui.add_sized(
+                                        [190.0, 20.0],
+                                        egui::TextEdit::singleline(&mut ec.default_val)
+                                            .font(egui::TextStyle::Monospace)
+                                            .hint_text("—")
+                                            .text_color_opt(tint(default_changed)),
+                                    );
                                 });
-                                ui.add_enabled(
-                                    enabled,
-                                    egui::TextEdit::singleline(&mut ec.default_val)
-                                        .desired_width(140.0)
-                                        .font(egui::TextStyle::Monospace)
-                                        .hint_text("—")
-                                        .text_color_opt(tint(default_changed)),
-                                );
-                                ui.centered_and_justified(|ui| ui.checkbox(&mut ec.mark_drop, ""));
+                                ui.checkbox(&mut ec.mark_drop, "");
                                 ui.end_row();
                             }
                         });
@@ -465,7 +464,8 @@ impl TableDialog {
                             let rt = RichText::new(name).monospace().small();
                             ui.label(if ix.mark_drop { rt.strikethrough() } else { rt });
                             let def = index_column_part(&ix.idx.definition);
-                            ui.add(
+                            ui.add_sized(
+                                [240.0, 16.0],
                                 egui::Label::new(
                                     RichText::new(def).monospace().small().color(Color32::from_gray(150)),
                                 )
@@ -490,15 +490,14 @@ impl TableDialog {
                     }
                     ui.end_row();
                     for (i, ni) in self.new_indexes.iter_mut().enumerate() {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut ni.name)
-                                .desired_width(120.0)
-                                .hint_text(i18n.td_hint_index_auto_name()),
+                        ui.add_sized(
+                            [130.0, 20.0],
+                            egui::TextEdit::singleline(&mut ni.name).hint_text(i18n.td_hint_index_auto_name()),
                         );
                         ui.horizontal(|ui| {
-                            ui.add(
+                            ui.add_sized(
+                                [190.0, 20.0],
                                 egui::TextEdit::singleline(&mut ni.columns)
-                                    .desired_width(160.0)
                                     .font(egui::TextStyle::Monospace)
                                     .hint_text("col1, col2"),
                             );
@@ -923,10 +922,9 @@ fn render_column_defs(
                     // ── Data rows ─────────────────────────────────────────
                     let col_count = columns.len();
                     for (i, col) in columns.iter_mut().enumerate() {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut col.name)
-                                .desired_width(108.0)
-                                .hint_text("column_name"),
+                        ui.add_sized(
+                            [130.0, 20.0],
+                            egui::TextEdit::singleline(&mut col.name).hint_text("column_name"),
                         );
 
                         egui::ComboBox::from_id_source(format!("{id_prefix}_type_{i}"))

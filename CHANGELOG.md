@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Edit Table / New Table: name, default and index fields rendered only a few characters wide (egui Grid cells start at zero width and clamp a TextEdit's `desired_width`) — now fixed-size; NOT NULL checkboxes no longer stretch every row
+
+### Changed
+- README: new screenshots from a fictional demo database (`scripts/demo_db.py`), v0.3.1 features, corrected shortcuts (there is no Ctrl+I), current size/RAM figures
+
+---
+
 ## [0.3.1] — 2026-10-24
 
 ### Added
